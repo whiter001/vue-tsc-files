@@ -22,5 +22,7 @@ desktop.ini
 !.env.example
 !.env.sample
 
+/.npmrc
+
 /.oxlintrc.cache.json
 *.tsbuildinfo
