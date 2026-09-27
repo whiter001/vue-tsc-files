@@ -7,11 +7,17 @@ Ported from [tsc-files](https://github.com/gustavopch/tsc-files).
 ## Installation
 
 ```sh
-npm i -D @itoxiq/vue-tsc-files
+npm i -D @whiter001/vue-tsc-files
 ```
 
 ```sh
-yarn add -D @itoxiq/vue-tsc-files
+pnpm add -D @whiter001/vue-tsc-files
+```
+
+`vue-tsc` and `typescript` are peer dependencies, install the versions matching your project:
+
+```sh
+pnpm add -D vue-tsc typescript
 ```
 
 ## Why
@@ -30,11 +36,17 @@ With lint-staged:
 }
 ```
 
+## pnpm support
+
+Works with npm and pnpm. The CLI locates the installed `vue-tsc` package via `require.resolve` and executes its JS entry with the current Node binary, so pnpm's symlinked `node_modules` layout is fully supported.
+
+A failed type check (or a failed spawn) always exits with a non-zero code.
+
 ## Sidenotes
 
 Flag "--noEmit" is always passed to underlying `vue-tsc` by default.
 
-`vue-tsc-files` passes module declarations and namespaces from `d.ts` files to `vue-tsc`, so please make sure that needed declarations are inside `d.ts` files.
+`vue-tsc-files` passes module declarations and namespaces from `d.ts` files to `vue-tsc`, so please make sure that needed declarations are inside `d.ts` files. The `d.ts` scan skips `node_modules`, dot directories (`.git`, `.github`, ...) and common build outputs (`dist`, `build`, `out`, `coverage`).
 
 ```javascript
 // example.d.ts
@@ -45,6 +57,17 @@ declare module "@vue/runtime-core" {
 }
 ```
 
+## Development
+
+Requires Node >= 22.18 (tests rely on built-in TypeScript type stripping).
+
+```sh
+pnpm install
+pnpm build      # rolldown → bin/cli.js
+pnpm check      # oxlint + oxfmt --check + tsc --noEmit
+pnpm test       # node:test unit + integration tests
+```
+
 ## License
 
-Released under the [MIT License](./LICENSE.md).
+Released under the [MIT License](./LICENSE).

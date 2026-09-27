@@ -1,46 +1,57 @@
 {
-  "name": "@itoxiq/vue-tsc-files",
-  "version": "1.2.0",
+  "name": "@whiter001/vue-tsc-files",
+  "version": "1.3.0",
   "description": "A tiny tool to run vue-tsc on specific files without ignoring tsconfig.json",
-  "author": "Moritz Reisinger <https://github.com/iToXiQ>",
+  "keywords": [
+    "lint-staged",
+    "pnpm",
+    "tsc",
+    "tsc-files",
+    "vue-tsc",
+    "vue-tsc-files"
+  ],
+  "license": "MIT",
+  "author": "whiter001",
   "repository": {
     "type": "git",
-    "url": "https://github.com/iToXiQ/vue-tsc-files.git"
+    "url": "https://github.com/whiter001/vue-tsc-files.git"
   },
-  "license": "MIT",
-  "files": [
-    "bin"
-  ],
-  "main": "./bin/cli.js",
   "bin": {
     "vue-tsc-files": "./bin/cli.js"
   },
-  "keywords": [
-    "vue-tsc",
-    "tsc",
-    "tsc-files",
-    "vue-tsc-files",
-    "lint-staged"
+  "files": [
+    "bin"
   ],
-  "scripts": {
-    "build": "rollup -c",
-    "test": "echo \"Error: no test specified\" && exit 1"
-  },
-  "dependencies": {
-    "vue-tsc": "^2.0.6"
-  },
-  "devDependencies": {
-    "@json-types/tsconfig": "^0.2.0",
-    "@rollup/plugin-typescript": "^11.1.5",
-    "@types/node": "^20.10.0",
-    "rollup": "^4.6.0",
-    "tslib": "^2.6.2",
-    "typescript": "^5.3.2"
-  },
-  "engines": {
-    "node": ">=14.0.0"
-  },
+  "type": "module",
+  "main": "./bin/cli.js",
   "publishConfig": {
     "access": "public"
-  }
+  },
+  "scripts": {
+    "build": "rolldown -c",
+    "lint": "oxlint",
+    "lint:fix": "oxlint --fix",
+    "fmt": "oxfmt --write",
+    "fmt:check": "oxfmt --check",
+    "check": "pnpm run lint && pnpm run fmt:check && npx tsc --noEmit",
+    "prepublishOnly": "pnpm run build",
+    "test": "node --test \"test/*.test.ts\""
+  },
+  "devDependencies": {
+    "@json-types/tsconfig": "^0.11.0",
+    "@types/node": "^26.6.3",
+    "oxfmt": "^0.70.0",
+    "oxlint": "^1.85.0",
+    "rolldown": "^1.2.11",
+    "typescript": "^6.0.3",
+    "vue-tsc": "^3.0.0"
+  },
+  "peerDependencies": {
+    "typescript": ">=5.0.0",
+    "vue-tsc": ">=2.0.0"
+  },
+  "engines": {
+    "node": ">=20.19.0"
+  },
+  "packageManager": "pnpm@12.4.1"
 }
