@@ -1,5 +1,7 @@
 # vue-tsc-files
 
+[English](./README.md) | [简体中文](./README.zh-CN.md)
+
 A tiny tool to run `vue-tsc` on specific files without ignoring `tsconfig.json`.
 
 Ported from [tsc-files](https://github.com/gustavopch/tsc-files).
@@ -56,13 +58,25 @@ A failed type check (or a failed spawn) always exits with a non-zero code.
 
 ## Type-check changed files without lint-staged
 
-Pass `--changed` to collect the file list from git instead of the command line. It uses `git status` semantics — modified, added, renamed, copied, unmerged and untracked `.ts`/`.tsx`/`.vue` files in the working tree are checked; deleted files are skipped. It can be combined with `--errors-in-changed-only`:
+Pass `--changed` to collect the file list from git instead of the command line. It uses `git status` semantics — modified, added, renamed, copied, unmerged and untracked `.ts`/`.tsx`/`.vue` files in the working tree are checked; deleted files are skipped. Both staged (index) and unstaged (worktree) changes are included. It can be combined with `--errors-in-changed-only`:
 
 ```sh
 vue-tsc-files --changed --errors-in-changed-only
 ```
 
-Explicitly passed files and `--changed` can be mixed (the union is checked). Explicit file paths are resolved against the current working directory (absolute paths also work); git-collected paths are made relative to the working directory. When run from a repository subdirectory, only changes under that directory are collected.
+Pass `--staged` to check only what the next commit would contain (the git index) — the classic pre-commit semantic, without needing lint-staged. **Note: `--staged` selects files by the index but type-checks their current on-disk content.** If you stage a file and then keep editing it without `git add`, the unstaged edits are checked too (the same limitation lint-staged has without its stash feature):
+
+```sh
+vue-tsc-files --staged --errors-in-changed-only
+```
+
+Pass `--unstaged` to check only tracked files whose worktree content differs from the index (`git diff` semantic). Untracked files are not part of git's "unstaged" concept — use `--changed` to include them:
+
+```sh
+vue-tsc-files --unstaged --errors-in-changed-only
+```
+
+Explicitly passed files, `--changed`, `--staged` and `--unstaged` can be mixed (the union is checked). Note that `--changed` already includes staged changes, so combining it with `--staged` is redundant; `--changed --unstaged` is redundant for the same reason. Explicit file paths are resolved against the current working directory (absolute paths also work); git-collected paths are made relative to the working directory. When run from a repository subdirectory, only changes under that directory are collected.
 
 ## Sidenotes
 

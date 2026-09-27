@@ -11,6 +11,43 @@ const ERRORS_IN_CHANGED_ONLY_FLAGS = new Set(["--errors-in-changed-only", "--cha
 /** 从 git 工作区收集变更文件的开关 */
 const CHANGED_FLAG = "--changed";
 
+/** 只收集已暂存（git index）文件的开关 */
+const STAGED_FLAG = "--staged";
+
+/** 只收集未暂存（worktree 相对 index 的改动）文件的开关 */
+const UNSTAGED_FLAG = "--unstaged";
+
+const HELP_FLAGS = new Set(["-h", "--help"]);
+
+const HELP_TEXT = `vue-tsc-files — run vue-tsc on specific files without ignoring tsconfig.json
+
+Usage:
+  vue-tsc-files [flags] <files...>
+  vue-tsc-files [--changed | --staged | --unstaged] [flags]
+
+File collection:
+  <files...>                  .vue/.ts/.tsx/.mts/.cts files, resolved against the
+                              current working directory (absolute paths also work)
+  --changed                   Collect changed files from git status
+                              (staged + unstaged + untracked)
+  --staged                    Collect only staged files (the git index).
+                              Note: files are selected by the index but their
+                              current on-disk content is type-checked
+  --unstaged                  Collect only unstaged changes to tracked files
+                              (git diff; untracked files are not included)
+
+Flags:
+  -p, --project <path>        Use a specific tsconfig.json
+  --errors-in-changed-only    Only errors in the specified files (plus global
+                              config errors) affect the exit code; errors in
+                              transitively compiled files are printed but ignored
+  --changed-only              Alias for --errors-in-changed-only
+  -h, --help                  Show this help
+
+File arguments and the collection flags can be mixed; the union is checked.
+--noEmit is always passed to vue-tsc; any other flags are forwarded as-is.
+`;
+
 /**
  * Sets up the arguments for vue-tsc.
  *
@@ -22,6 +59,8 @@ export function setupArgs() {
   const explicitFiles = getTscFiles(args);
   let errorsInChangedOnly = false;
   let changed = false;
+  let staged = false;
+  let unstaged = false;
 
   // 单次遍历同时剔除文件参数和 -p/--project 及其值。
   // 不能先过滤文件再按原始索引 splice：文件参数出现在 -p 之前时索引会错位，
@@ -30,6 +69,11 @@ export function setupArgs() {
   const remainingArgsToForward: string[] = [];
   for (let i = 0; i < args.length; i++) {
     const arg = args[i];
+    if (HELP_FLAGS.has(arg)) {
+      // 在任何文件收集和 tsconfig 读取之前生效，保证无 tsconfig 的目录里也能用
+      console.log(HELP_TEXT);
+      process.exit(0);
+    }
     if (arg === "-p" || arg === "--project") {
       projectValue = args[i + 1];
       i++;
@@ -43,19 +87,47 @@ export function setupArgs() {
       changed = true;
       continue;
     }
+    if (arg === STAGED_FLAG) {
+      staged = true;
+      continue;
+    }
+    if (arg === UNSTAGED_FLAG) {
+      unstaged = true;
+      continue;
+    }
     if (explicitFiles.includes(arg)) {
       continue;
     }
     remainingArgsToForward.push(arg);
   }
 
-  const specifiedFiles = changed
-    ? [...new Set([...explicitFiles, ...getChangedFiles()])]
-    : explicitFiles;
+  const specifiedFiles = [...new Set(explicitFiles)];
+  if (changed) {
+    for (const file of getChangedFiles()) {
+      if (!specifiedFiles.includes(file)) {
+        specifiedFiles.push(file);
+      }
+    }
+  }
+  if (staged) {
+    for (const file of getStagedFiles()) {
+      if (!specifiedFiles.includes(file)) {
+        specifiedFiles.push(file);
+      }
+    }
+  }
+  if (unstaged) {
+    for (const file of getUnstagedFiles()) {
+      if (!specifiedFiles.includes(file)) {
+        specifiedFiles.push(file);
+      }
+    }
+  }
 
   if (specifiedFiles.length === 0) {
-    if (changed) {
-      console.log("No changed files to type-check");
+    if (changed || staged || unstaged) {
+      const source = changed ? "changed" : staged ? "staged" : "unstaged";
+      console.log(`No ${source} files to type-check`);
     }
     process.exit(0);
   }
@@ -67,6 +139,8 @@ export function setupArgs() {
     specifiedFiles,
     errorsInChangedOnly,
     changed,
+    staged,
+    unstaged,
     projectValue,
     remainingArgsToForward,
   };
@@ -185,34 +259,77 @@ function runGit(args: string[], failureHint: string): string {
 }
 
 /**
+ * Returns the absolute path of the git repository root.
+ */
+function getRepoRoot(): string {
+  return runGit(
+    ["rev-parse", "--show-toplevel"],
+    "Failed to locate the git repository root. --changed/--staged/--unstaged must be used inside a git repository",
+  ).trim();
+}
+
+/**
+ * Converts repository-root-relative git paths to cwd-relative ones and drops
+ * entries that must never be type-checked. 未跟踪的 node_modules 在 -uall
+ * 下会逐文件展开，可能产生几十万行输出；正解是 .gitignore，这里兜底直接
+ * 丢弃（依赖文件本就不该参与检查）。
+ */
+function toCheckableFiles(repoRoot: string, gitPaths: string[]): string[] {
+  return gitPaths
+    .map((path) => relative(process.cwd(), resolve(repoRoot, path)))
+    .filter((path) => !path.split(/[\\/]/).includes("node_modules"))
+    .filter(isTscFile);
+}
+
+/**
  * Collects changed .ts/.tsx/.vue files from the git working tree, equivalent
  * to `git status` semantics: modified, added, renamed, copied, unmerged and
- * untracked files. `-uall` 让 git 直接展开未跟踪目录里的每个文件，
+ * untracked files. git status 的 XY 两列同时覆盖已暂存（index）和未暂存
+ * （worktree）变更。`-uall` 让 git 直接展开未跟踪目录里的每个文件，
  * 无需自行递归目录。Output paths are made relative to the current working
  * directory so the tool works when run from a repository subdirectory.
  *
  * @returns Changed file paths relative to process.cwd().
  */
 export function getChangedFiles(): string[] {
-  const rootOutput = runGit(
-    ["rev-parse", "--show-toplevel"],
-    "Failed to locate the git repository root. --changed must be used inside a git repository",
-  );
-  const repoRoot = rootOutput.trim();
-
+  const repoRoot = getRepoRoot();
   const statusOutput = runGit(
     ["status", "--porcelain=v1", "-z", "-uall", "--", "."],
     "git status failed",
   );
+  return toCheckableFiles(repoRoot, parseGitStatusPorcelain(statusOutput));
+}
 
-  return (
-    parseGitStatusPorcelain(statusOutput)
-      .map((path) => relative(process.cwd(), resolve(repoRoot, path)))
-      // 未跟踪的 node_modules 在 -uall 下会逐文件展开，可能产生几十万行输出。
-      // 正解是 .gitignore，这里兜底直接丢弃（依赖文件本就不该参与检查）
-      .filter((path) => !path.split(/[\\/]/).includes("node_modules"))
-      .filter(isTscFile)
+/**
+ * Collects only staged .ts/.tsx/.vue files (the git index), i.e. exactly what
+ * the next commit would contain — the pre-commit hook semantic. `--name-only`
+ * 对重命名只输出新路径；--diff-filter=ACMRT 排除已删除（D）和未合并（U）。
+ *
+ * @returns Staged file paths relative to process.cwd().
+ */
+export function getStagedFiles(): string[] {
+  const repoRoot = getRepoRoot();
+  const diffOutput = runGit(
+    ["diff", "--cached", "--name-only", "-z", "--diff-filter=ACMRT", "--", "."],
+    "git diff --cached failed",
   );
+  return toCheckableFiles(repoRoot, diffOutput.split("\0").filter(Boolean));
+}
+
+/**
+ * Collects only unstaged .ts/.tsx/.vue files: tracked files whose worktree
+ * content differs from the git index (`git diff` semantic). 未跟踪文件不属于
+ * git 的 "unstaged" 概念，不在此收集（需要时请用 --changed）。
+ *
+ * @returns Unstaged file paths relative to process.cwd().
+ */
+export function getUnstagedFiles(): string[] {
+  const repoRoot = getRepoRoot();
+  const diffOutput = runGit(
+    ["diff", "--name-only", "-z", "--diff-filter=ACMRT", "--", "."],
+    "git diff failed",
+  );
+  return toCheckableFiles(repoRoot, diffOutput.split("\0").filter(Boolean));
 }
 
 /**

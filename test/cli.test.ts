@@ -170,6 +170,24 @@ test("缺少 tsconfig 时给出友好提示并以 1 退出", () => {
   }
 });
 
+test("--help 与 -h 打印用法并以 0 退出（无需 tsconfig）", () => {
+  // 故意使用没有 tsconfig 的目录，验证 help 在读取配置之前生效
+  const root = mkdtempSync(join(tmpdir(), "vtf-it-"));
+  try {
+    for (const flag of ["--help", "-h"]) {
+      const result = runCli(root, [flag]);
+      assert.equal(result.status, 0, result.stderr);
+      assert.match(result.stdout, /Usage:/);
+      assert.match(result.stdout, /--errors-in-changed-only/);
+      assert.match(result.stdout, /--changed/);
+      assert.match(result.stdout, /--staged/);
+      assert.match(result.stdout, /--unstaged/);
+    }
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("检查结束后临时 tsconfig 文件被清理", () => {
   const root = createFixture({
     "good.ts": "const a: number = 1;\nexport default a;\n",
@@ -244,6 +262,77 @@ test("--changed 与 --errors-in-changed-only 组合忽略已提交依赖的历�
     // 不加 --errors-in-changed-only 时 dep.ts 的历史错误仍然失败
     const strict = runCli(root, ["--changed"]);
     assert.notEqual(strict.status, 0);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("--staged 只检查已暂存文件", () => {
+  const root = createGitFixture({
+    "good.ts": "const a: number = 1;\nexport default a;\n",
+  });
+  try {
+    // 仅暂存的错误文件 + 仅工作区（未 git add）的错误修改
+    writeFileSync(join(root, "staged-bad.ts"), 'const b: number = "x";\nexport default b;\n');
+    git(root, ["add", "staged-bad.ts"]);
+    writeFileSync(join(root, "good.ts"), 'const a: number = "y";\nexport default a;\n');
+
+    const result = runCli(root, ["--staged"]);
+    assert.notEqual(result.status, 0);
+    // 暂存文件的错误被检查到；未暂存的 good.ts 不参与本次检查
+    assert.match(result.stdout, /staged-bad\.ts.*error TS2322/);
+    assert.doesNotMatch(result.stdout, /good\.ts\(\d+,\d+\): error/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("--staged 无暂存文件时提示并以 0 退出", () => {
+  const root = createGitFixture({
+    "good.ts": "const a: number = 1;\nexport default a;\n",
+  });
+  try {
+    // 只有未暂存的工作区修改
+    writeFileSync(join(root, "good.ts"), 'const a: number = "y";\nexport default a;\n');
+    const result = runCli(root, ["--staged"]);
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stdout, /No staged files/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("--unstaged 只检查未暂存文件", () => {
+  const root = createGitFixture({
+    "good.ts": "const a: number = 1;\nexport default a;\n",
+  });
+  try {
+    // 仅暂存的错误文件 + 仅未暂存的错误修改
+    writeFileSync(join(root, "staged-bad.ts"), 'const b: number = "x";\nexport default b;\n');
+    git(root, ["add", "staged-bad.ts"]);
+    writeFileSync(join(root, "good.ts"), 'const a: number = "y";\nexport default a;\n');
+
+    const result = runCli(root, ["--unstaged"]);
+    assert.notEqual(result.status, 0);
+    // 未暂存的 good.ts 被检查到；staged-bad.ts 没有未暂存改动，不参与本次检查
+    assert.match(result.stdout, /good\.ts\(\d+,\d+\): error TS2322/);
+    assert.doesNotMatch(result.stdout, /staged-bad\.ts\(\d+,\d+\): error/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("--unstaged 无未暂存文件时提示并以 0 退出", () => {
+  const root = createGitFixture({
+    "good.ts": "const a: number = 1;\nexport default a;\n",
+  });
+  try {
+    // 只有已暂存的修改
+    writeFileSync(join(root, "good.ts"), 'const a: number = "y";\nexport default a;\n');
+    git(root, ["add", "good.ts"]);
+    const result = runCli(root, ["--unstaged"]);
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stdout, /No unstaged files/);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
