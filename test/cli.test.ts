@@ -6,7 +6,7 @@ import { tmpdir } from "os";
 import { join, dirname } from "path";
 import { fileURLToPath } from "url";
 
-const CLI = join(dirname(fileURLToPath(import.meta.url)), "..", "bin", "cli.js");
+const CLI = join(dirname(fileURLToPath(import.meta.url)), "..", "vue-tsc-files");
 
 const TSCONFIG = JSON.stringify({
   compilerOptions: { strict: true },

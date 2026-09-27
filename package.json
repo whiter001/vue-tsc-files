@@ -14,16 +14,18 @@
   "author": "whiter001",
   "repository": {
     "type": "git",
-    "url": "https://github.com/whiter001/vue-tsc-files.git"
+    "url": "git+https://github.com/whiter001/vue-tsc-files.git"
   },
   "bin": {
-    "vue-tsc-files": "./bin/cli.js"
+    "vue-tsc-files": "./vue-tsc-files"
   },
   "files": [
-    "bin"
+    "vue-tsc-files",
+    "README.md",
+    "LICENSE"
   ],
   "type": "module",
-  "main": "./bin/cli.js",
+  "main": "./vue-tsc-files",
   "publishConfig": {
     "access": "public"
   },

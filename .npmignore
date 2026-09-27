@@ -1,4 +1,14 @@
 /node_modules
-.github
-.gitignore
-.git
+/.github
+/.gitignore
+/.git
+/src
+/test
+/rolldown.config.mjs
+/tsconfig.json
+/.oxfmtrc.json
+/.oxlintrc.json
+/.oxlintrc.cache.json
+/pnpm-lock.yaml
+/.npmrc
+/bin
