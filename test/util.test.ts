@@ -3,7 +3,13 @@ import assert from "node:assert/strict";
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
-import { getTscFiles, getDtsFiles, randomChars, setupArgs } from "../src/util.ts";
+import {
+  getTscFiles,
+  getDtsFiles,
+  randomChars,
+  setupArgs,
+  filterErrorsInFiles,
+} from "../src/util.ts";
 
 /** 在替换 process.argv 的上下文中调用 setupArgs */
 function withArgv(args: string[], fn: () => void) {
@@ -78,4 +84,56 @@ test("setupArgs 转发其他 flag，剔除文件参数", () => {
     const { remainingArgsToForward } = setupArgs();
     assert.deepEqual(remainingArgsToForward, ["--noEmit"]);
   });
+});
+
+test("setupArgs 解析 --errors-in-changed-only 及别名，且不转发给 vue-tsc", () => {
+  for (const flag of ["--errors-in-changed-only", "--changed-only"]) {
+    withArgv(["src/a.ts", flag], () => {
+      const { errorsInChangedOnly, specifiedFiles, remainingArgsToForward } = setupArgs();
+      assert.equal(errorsInChangedOnly, true);
+      assert.deepEqual(specifiedFiles, ["src/a.ts"]);
+      assert.ok(!remainingArgsToForward.includes(flag));
+    });
+  }
+});
+
+test("setupArgs 未传 flag 时 errorsInChangedOnly 为 false", () => {
+  withArgv(["src/a.ts"], () => {
+    const { errorsInChangedOnly } = setupArgs();
+    assert.equal(errorsInChangedOnly, false);
+  });
+});
+
+test("filterErrorsInFiles 只保留指定文件的错误，忽略传递依赖的错误", () => {
+  const output = [
+    "src/changed.ts(1,7): error TS2322: Type 'string' is not assignable to type 'number'.",
+    "src/dep.ts(2,3): error TS2322: Type 'string' is not assignable to type 'number'.",
+  ].join("\n");
+
+  const { errorsInSpecifiedFiles, globalErrors } = filterErrorsInFiles(output, ["src/changed.ts"]);
+  assert.equal(errorsInSpecifiedFiles.length, 1);
+  assert.match(errorsInSpecifiedFiles[0], /src\/changed\.ts/);
+  assert.deepEqual(globalErrors, []);
+});
+
+test("filterErrorsInFiles 中 ./ 前缀和相对路径写法等价", () => {
+  const output = "src/a.ts(1,1): error TS2322: x";
+  const { errorsInSpecifiedFiles } = filterErrorsInFiles(output, ["./src/a.ts"]);
+  assert.equal(errorsInSpecifiedFiles.length, 1);
+});
+
+test("filterErrorsInFiles 兼容含空格及单引号包裹的路径", () => {
+  const spaced = "src/foo bar.ts(1,7): error TS2322: x";
+  assert.equal(filterErrorsInFiles(spaced, ["src/foo bar.ts"]).errorsInSpecifiedFiles.length, 1);
+
+  // 防御性格式：部分 formatter 会给含空格路径加单引号
+  const quoted = "'src/foo bar.ts'(1,7): error TS2322: x";
+  assert.equal(filterErrorsInFiles(quoted, ["src/foo bar.ts"]).errorsInSpecifiedFiles.length, 1);
+});
+
+test("filterErrorsInFiles 收集无文件位置的全局错误", () => {
+  const output = "error TS5083: Cannot read file 'tsconfig.json'.";
+  const { errorsInSpecifiedFiles, globalErrors } = filterErrorsInFiles(output, ["src/a.ts"]);
+  assert.deepEqual(errorsInSpecifiedFiles, []);
+  assert.equal(globalErrors.length, 1);
 });

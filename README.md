@@ -42,6 +42,18 @@ Works with npm and pnpm. The CLI locates the installed `vue-tsc` package via `re
 
 A failed type check (or a failed spawn) always exits with a non-zero code.
 
+## Only fail on errors in the specified files
+
+`vue-tsc` compiles the specified files together with everything they transitively import, so the output may contain pre-existing type errors in files you did not touch. Pass `--errors-in-changed-only` (alias: `--changed-only`) to ignore those: the full output is still printed, but only errors reported in the files passed on the command line (plus global config errors) affect the exit code.
+
+```json
+{
+  "lint-staged": {
+    "**/*.{vue,ts,tsx}": "vue-tsc-files --errors-in-changed-only"
+  }
+}
+```
+
 ## Sidenotes
 
 Flag "--noEmit" is always passed to underlying `vue-tsc` by default.

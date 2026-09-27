@@ -1,8 +1,11 @@
 import { readdirSync, lstatSync, writeFileSync, unlinkSync } from "fs";
-import { join } from "path";
+import { join, resolve } from "path";
 import { randomBytes } from "crypto";
 import ts from "typescript";
 import { type TSConfig } from "@json-types/tsconfig";
+
+/** 只让指定文件自身的 error 影响退出码的开关（--changed-only 为别名） */
+const ERRORS_IN_CHANGED_ONLY_FLAGS = new Set(["--errors-in-changed-only", "--changed-only"]);
 
 /**
  * Sets up the arguments for vue-tsc.
@@ -13,6 +16,8 @@ export function setupArgs() {
   const args = process.argv.slice(2);
 
   const files = getFiles(args);
+  const specifiedFiles = getTscFiles(args);
+  let errorsInChangedOnly = false;
 
   // 单次遍历同时剔除文件参数和 -p/--project 及其值。
   // 不能先过滤文件再按原始索引 splice：文件参数出现在 -p 之前时索引会错位，
@@ -26,6 +31,10 @@ export function setupArgs() {
       i++;
       continue;
     }
+    if (ERRORS_IN_CHANGED_ONLY_FLAGS.has(arg)) {
+      errorsInChangedOnly = true;
+      continue;
+    }
     if (files.includes(arg)) {
       continue;
     }
@@ -34,6 +43,8 @@ export function setupArgs() {
 
   return {
     files,
+    specifiedFiles,
+    errorsInChangedOnly,
     projectValue,
     remainingArgsToForward,
   };
@@ -212,4 +223,62 @@ export function createAndSetupTsConfig(files: string[], argsProjectValue?: strin
   const tmpTsconfigPath = createTmpTsConfig(rootTsConfig, files);
 
   return tmpTsconfigPath;
+}
+
+/** 带位置信息的诊断行，如 src/a.ts(12,5): error TS2322: ... */
+const LOCATED_ERROR_RE = /^(.+?)\(\d+,\d+\): error TS\d+:/;
+/** 不带文件位置的全局错误，如 error TS5083: Cannot read file ... */
+const GLOBAL_ERROR_RE = /^error TS\d+:/;
+
+/**
+ * Normalizes a diagnostic file path for comparison with the specified files.
+ * tsc prints paths relative to the current working directory; both sides are
+ * resolved to absolute paths so "./a.ts" and "a.ts" compare equal.
+ * 防御性去掉首尾单引号：tsc 当前不会对含空格的路径加引号，但部分
+ * pretty 输出/第三方 formatter 会（如 'foo bar.ts'(1,1): error ...）。
+ * Windows 文件系统不区分大小写，统一转小写。
+ */
+function normalizeDiagnosticPath(filePath: string): string {
+  const unquoted = filePath.replace(/^'|'$/g, "");
+  const absolute = resolve(process.cwd(), unquoted).replace(/\\/g, "/");
+  return process.platform === "win32" ? absolute.toLowerCase() : absolute;
+}
+
+export interface ErrorFilterResult {
+  /** 指定文件自身的错误行 */
+  errorsInSpecifiedFiles: string[];
+  /** 不属于任何文件的全局错误（配置错误等），出现即视为失败 */
+  globalErrors: string[];
+}
+
+/**
+ * Splits vue-tsc output into errors belonging to the specified files and
+ * global errors. Errors reported in transitively compiled files are ignored:
+ * with --errors-in-changed-only they must not affect the exit code.
+ *
+ * @param output - The combined stdout/stderr of the vue-tsc run.
+ * @param specifiedFiles - The files explicitly passed on the command line
+ *   (auto-collected d.ts files are excluded, matching the shell wrapper's semantics).
+ * @returns The matched error lines, split by kind.
+ */
+export function filterErrorsInFiles(output: string, specifiedFiles: string[]): ErrorFilterResult {
+  const targets = new Set(specifiedFiles.map(normalizeDiagnosticPath));
+  const errorsInSpecifiedFiles: string[] = [];
+  const globalErrors: string[] = [];
+
+  for (const line of output.split(/\r?\n/)) {
+    const trimmed = line.trim();
+    const located = LOCATED_ERROR_RE.exec(trimmed);
+    if (located) {
+      if (targets.has(normalizeDiagnosticPath(located[1]))) {
+        errorsInSpecifiedFiles.push(line);
+      }
+      continue;
+    }
+    if (GLOBAL_ERROR_RE.test(trimmed)) {
+      globalErrors.push(line);
+    }
+  }
+
+  return { errorsInSpecifiedFiles, globalErrors };
 }
