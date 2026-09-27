@@ -9,6 +9,7 @@ import {
   randomChars,
   setupArgs,
   filterErrorsInFiles,
+  parseGitStatusPorcelain,
 } from "../src/util.ts";
 
 /** 在替换 process.argv 的上下文中调用 setupArgs */
@@ -136,4 +137,31 @@ test("filterErrorsInFiles 收集无文件位置的全局错误", () => {
   const { errorsInSpecifiedFiles, globalErrors } = filterErrorsInFiles(output, ["src/a.ts"]);
   assert.deepEqual(errorsInSpecifiedFiles, []);
   assert.equal(globalErrors.length, 1);
+});
+
+test("parseGitStatusPorcelain 解析各类变更状态，跳过删除文件和重命名旧路径", () => {
+  const output =
+    [
+      " M src/a.ts",
+      "M  src/b.vue",
+      "A  src/c.tsx",
+      "?? src/d.vue",
+      "D  src/e.ts",
+      "R  src/new.ts",
+      "src/old.ts",
+      "UU src/f.ts",
+    ].join("\0") + "\0";
+
+  assert.deepEqual(parseGitStatusPorcelain(output), [
+    "src/a.ts",
+    "src/b.vue",
+    "src/c.tsx",
+    "src/d.vue",
+    "src/new.ts",
+    "src/f.ts",
+  ]);
+});
+
+test("parseGitStatusPorcelain 空输出返回空数组", () => {
+  assert.deepEqual(parseGitStatusPorcelain(""), []);
 });

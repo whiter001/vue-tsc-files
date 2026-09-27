@@ -1,11 +1,15 @@
 import { readdirSync, lstatSync, writeFileSync, unlinkSync } from "fs";
-import { join, resolve } from "path";
+import { join, resolve, relative } from "path";
 import { randomBytes } from "crypto";
+import { spawnSync } from "child_process";
 import ts from "typescript";
 import { type TSConfig } from "@json-types/tsconfig";
 
 /** 只让指定文件自身的 error 影响退出码的开关（--changed-only 为别名） */
 const ERRORS_IN_CHANGED_ONLY_FLAGS = new Set(["--errors-in-changed-only", "--changed-only"]);
+
+/** 从 git 工作区收集变更文件的开关 */
+const CHANGED_FLAG = "--changed";
 
 /**
  * Sets up the arguments for vue-tsc.
@@ -15,9 +19,9 @@ const ERRORS_IN_CHANGED_ONLY_FLAGS = new Set(["--errors-in-changed-only", "--cha
 export function setupArgs() {
   const args = process.argv.slice(2);
 
-  const files = getFiles(args);
-  const specifiedFiles = getTscFiles(args);
+  const explicitFiles = getTscFiles(args);
   let errorsInChangedOnly = false;
+  let changed = false;
 
   // 单次遍历同时剔除文件参数和 -p/--project 及其值。
   // 不能先过滤文件再按原始索引 splice：文件参数出现在 -p 之前时索引会错位，
@@ -35,16 +39,34 @@ export function setupArgs() {
       errorsInChangedOnly = true;
       continue;
     }
-    if (files.includes(arg)) {
+    if (arg === CHANGED_FLAG) {
+      changed = true;
+      continue;
+    }
+    if (explicitFiles.includes(arg)) {
       continue;
     }
     remainingArgsToForward.push(arg);
   }
 
+  const specifiedFiles = changed
+    ? [...new Set([...explicitFiles, ...getChangedFiles()])]
+    : explicitFiles;
+
+  if (specifiedFiles.length === 0) {
+    if (changed) {
+      console.log("No changed files to type-check");
+    }
+    process.exit(0);
+  }
+
+  const files = [...specifiedFiles, ...getDtsFiles(process.cwd())];
+
   return {
     files,
     specifiedFiles,
     errorsInChangedOnly,
+    changed,
     projectValue,
     remainingArgsToForward,
   };
@@ -88,37 +110,109 @@ export function getDtsFiles(dir: string): string[] {
 }
 
 /**
+ * Returns whether the argument is a file with a supported extension.
+ * @param arg - The argument to check.
+ */
+export function isTscFile(arg: string) {
+  return (
+    arg.endsWith(".vue") ||
+    arg.endsWith(".ts") ||
+    arg.endsWith(".tsx") ||
+    arg.endsWith(".mts") ||
+    arg.endsWith(".cts")
+  );
+}
+
+/**
  * Filters the given array of arguments and returns an array of files with specific extensions.
  * @param args - The array of arguments to filter.
  * @returns An array of files with extensions ".vue", ".ts", ".tsx", ".mts" or ".cts".
  */
 export function getTscFiles(args: string[]) {
-  return args.filter(
-    (arg) =>
-      arg.endsWith(".vue") ||
-      arg.endsWith(".ts") ||
-      arg.endsWith(".tsx") ||
-      arg.endsWith(".mts") ||
-      arg.endsWith(".cts"),
-  );
+  return args.filter(isTscFile);
 }
 
 /**
- * Retrieves a list of files to be processed based on the provided arguments.
+ * Parses `git status --porcelain=v1 -z` output into changed file paths.
+ * -z 格式下每个条目为 "XY path\0"；重命名/复制条目（XY 含 R/C）紧随其后
+ * 还有一个旧路径条目，跳过它只保留新路径。已删除的文件（D）不参与检查。
  *
- * @param args - The arguments passed to the program.
- * @returns An array of file paths to be processed.
+ * @param output - The raw stdout of git status.
+ * @returns Changed file paths relative to the repository root.
  */
-export function getFiles(args: string[]): string[] {
-  const tscFiles = getTscFiles(args);
-
-  if (tscFiles.length == 0) {
-    process.exit(0);
+export function parseGitStatusPorcelain(output: string): string[] {
+  const tokens = output.split("\0").filter((token) => token.length > 0);
+  const paths: string[] = [];
+  for (let i = 0; i < tokens.length; i++) {
+    const status = tokens[i].slice(0, 2);
+    const path = tokens[i].slice(3);
+    if (/[RC]/.test(status)) {
+      if (/[MARCU?]/.test(status)) {
+        paths.push(path);
+      }
+      // 重命名/复制的第二个条目是旧路径，已删除不再检查
+      i++;
+      continue;
+    }
+    if (/[MARCU?]/.test(status)) {
+      paths.push(path);
+    }
   }
+  return paths;
+}
 
-  const dtsFiles = getDtsFiles(process.cwd());
+/** git 子进程的超时上限，避免 CI 资源紧张或 git 卡死时 CLI 无期限挂起 */
+const GIT_TIMEOUT_MS = 30_000;
 
-  return [...tscFiles, ...dtsFiles];
+/**
+ * Runs a git command and returns its stdout, exiting with a clear message on
+ * failure or timeout.
+ */
+function runGit(args: string[], failureHint: string): string {
+  const result = spawnSync("git", args, { encoding: "utf8", timeout: GIT_TIMEOUT_MS });
+  if (result.error && (result.error as NodeJS.ErrnoException).code === "ETIMEDOUT") {
+    console.error(
+      `git ${args[0]} timed out after ${GIT_TIMEOUT_MS / 1000}s. ` +
+        "The repository may be very large or git may be stuck; retry or check git status manually.",
+    );
+    process.exit(1);
+  }
+  if (result.error || result.status !== 0) {
+    console.error(`${failureHint}: ${result.stderr || result.error}`);
+    process.exit(1);
+  }
+  return result.stdout;
+}
+
+/**
+ * Collects changed .ts/.tsx/.vue files from the git working tree, equivalent
+ * to `git status` semantics: modified, added, renamed, copied, unmerged and
+ * untracked files. `-uall` 让 git 直接展开未跟踪目录里的每个文件，
+ * 无需自行递归目录。Output paths are made relative to the current working
+ * directory so the tool works when run from a repository subdirectory.
+ *
+ * @returns Changed file paths relative to process.cwd().
+ */
+export function getChangedFiles(): string[] {
+  const rootOutput = runGit(
+    ["rev-parse", "--show-toplevel"],
+    "Failed to locate the git repository root. --changed must be used inside a git repository",
+  );
+  const repoRoot = rootOutput.trim();
+
+  const statusOutput = runGit(
+    ["status", "--porcelain=v1", "-z", "-uall", "--", "."],
+    "git status failed",
+  );
+
+  return (
+    parseGitStatusPorcelain(statusOutput)
+      .map((path) => relative(process.cwd(), resolve(repoRoot, path)))
+      // 未跟踪的 node_modules 在 -uall 下会逐文件展开，可能产生几十万行输出。
+      // 正解是 .gitignore，这里兜底直接丢弃（依赖文件本就不该参与检查）
+      .filter((path) => !path.split(/[\\/]/).includes("node_modules"))
+      .filter(isTscFile)
+  );
 }
 
 /**

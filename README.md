@@ -54,6 +54,16 @@ A failed type check (or a failed spawn) always exits with a non-zero code.
 }
 ```
 
+## Type-check changed files without lint-staged
+
+Pass `--changed` to collect the file list from git instead of the command line. It uses `git status` semantics — modified, added, renamed, copied, unmerged and untracked `.ts`/`.tsx`/`.vue` files in the working tree are checked; deleted files are skipped. It can be combined with `--errors-in-changed-only`:
+
+```sh
+vue-tsc-files --changed --errors-in-changed-only
+```
+
+Explicitly passed files and `--changed` can be mixed (the union is checked). Explicit file paths are resolved against the current working directory (absolute paths also work); git-collected paths are made relative to the working directory. When run from a repository subdirectory, only changes under that directory are collected.
+
 ## Sidenotes
 
 Flag "--noEmit" is always passed to underlying `vue-tsc` by default.

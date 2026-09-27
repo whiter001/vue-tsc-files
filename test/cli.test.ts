@@ -30,6 +30,22 @@ function runCli(cwd: string, args: string[]) {
   });
 }
 
+function git(cwd: string, args: string[]) {
+  const result = spawnSync("git", args, { cwd, encoding: "utf8" });
+  if (result.status !== 0) {
+    throw new Error(`git ${args.join(" ")} failed: ${result.stderr}`);
+  }
+}
+
+/** 创建已提交基线的 git fixture，之后的文件改动即为"变更" */
+function createGitFixture(files: Record<string, string>) {
+  const root = createFixture(files);
+  git(root, ["init", "-q"]);
+  git(root, ["add", "."]);
+  git(root, ["-c", "user.name=test", "-c", "user.email=test@test", "commit", "-qm", "init"]);
+  return root;
+}
+
 test("类型错误文件退出码非 0 并输出诊断", () => {
   const root = createFixture({
     "bad.ts": 'const a: number = "x";\nexport default a;\n',
@@ -162,6 +178,72 @@ test("检查结束后临时 tsconfig 文件被清理", () => {
     runCli(root, ["good.ts"]);
     const leftovers = readdirSyncTmpConfigs(root);
     assert.deepEqual(leftovers, []);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("--changed 收集工作区变更文件并检查", () => {
+  const root = createGitFixture({
+    "good.ts": "const a: number = 1;\nexport default a;\n",
+  });
+  try {
+    writeFileSync(join(root, "bad.ts"), 'const b: number = "x";\nexport default b;\n');
+    const result = runCli(root, ["--changed"]);
+    assert.notEqual(result.status, 0);
+    assert.match(result.stdout, /bad\.ts.*error TS2322/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("--changed 无变更文件时提示并以 0 退出", () => {
+  const root = createGitFixture({
+    "good.ts": "const a: number = 1;\nexport default a;\n",
+  });
+  try {
+    const result = runCli(root, ["--changed"]);
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stdout, /No changed files/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("--changed 忽略未跟踪的 node_modules 内容", () => {
+  const root = createGitFixture({
+    "good.ts": "const a: number = 1;\nexport default a;\n",
+  });
+  try {
+    // 唯一变更位于未跟踪的 node_modules 内，视为无变更
+    mkdirSync(join(root, "node_modules", "pkg"), { recursive: true });
+    writeFileSync(
+      join(root, "node_modules", "pkg", "bad.ts"),
+      'const b: number = "x";\nexport default b;\n',
+    );
+    const result = runCli(root, ["--changed"]);
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stdout, /No changed files/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("--changed 与 --errors-in-changed-only 组合忽略已提交依赖的历史错误", () => {
+  const root = createGitFixture({
+    "good.ts": 'import a from "./dep";\nexport default a;\n',
+    "dep.ts": 'const a: number = "x";\nexport default a;\n',
+  });
+  try {
+    // 修改 good.ts 使其成为变更文件；dep.ts 的历史错误已提交
+    writeFileSync(join(root, "good.ts"), 'import a from "./dep";\nexport default String(a);\n');
+
+    const lenient = runCli(root, ["--changed", "--errors-in-changed-only"]);
+    assert.equal(lenient.status, 0, lenient.stderr);
+
+    // 不加 --errors-in-changed-only 时 dep.ts 的历史错误仍然失败
+    const strict = runCli(root, ["--changed"]);
+    assert.notEqual(strict.status, 0);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
