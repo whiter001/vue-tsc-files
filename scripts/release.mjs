@@ -40,15 +40,19 @@ function bumpVersion(current, target) {
   throw new Error(`Invalid version: ${target}. Use major|minor|patch|<x.y.z>.`);
 }
 
-function npmWhoAmI() {
-  // Windows 上 npm 是 npm.cmd，不带 shell 的 spawnSync 会 ENOENT
-  const r = spawnSync("npm", ["whoami"], {
+function npmWhoAmI(registry) {
+  // Windows 上 npm 是 npm.cmd，不带 shell 的 spawnSync 会 ENOENT。
+  // 必须对发布 registry 检查登录态：用户默认 registry 常是只读镜像
+  // （如 registry.npmmirror.com），对它 whoami 永远未登录。
+  const args = ["whoami"];
+  if (registry) args.push(`--registry=${registry}`);
+  const r = spawnSync("npm", args, {
     cwd: ROOT,
     encoding: "utf8",
     shell: process.platform === "win32",
   });
   if (r.error || r.status !== 0) {
-    throw new Error("Not logged in to npm. Run `npm login` first.");
+    throw new Error(`Not logged in to npm (${registry ?? "default registry"}). Run \`npm login\` first.`);
   }
   return r.stdout.trim();
 }
@@ -78,7 +82,7 @@ console.log(`\n@whiter001/vue-tsc-files: ${oldVersion} -> ${newVersion}`);
 if (!willBump) {
   console.log("(version unchanged, skipping bump)");
 }
-console.log(`npm user: ${npmWhoAmI()}\n`);
+console.log(`npm user: ${npmWhoAmI(pkg.publishConfig?.registry)}\n`);
 
 if (willBump) {
   pkg.version = newVersion;
