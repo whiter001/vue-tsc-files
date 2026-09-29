@@ -1,6 +1,6 @@
 {
   "name": "@whiter001/vue-tsc-files",
-  "version": "1.3.1",
+  "version": "1.3.2",
   "description": "A tiny tool to run vue-tsc on specific files without ignoring tsconfig.json",
   "keywords": [
     "lint-staged",
