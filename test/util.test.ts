@@ -38,6 +38,15 @@ test("getTscFiles 只保留 ts/tsx/vue/mts/cts 文件", () => {
   assert.deepEqual(files, ["a.ts", "b.tsx", "c.vue", "d.mts", "e.cts"]);
 });
 
+test("getTscFiles 扩展名匹配大小写不敏感", () => {
+  assert.deepEqual(getTscFiles(["A.TS", "B.Vue", "c.Tsx", "d.MTS", "e.js", "f.json"]), [
+    "A.TS",
+    "B.Vue",
+    "c.Tsx",
+    "d.MTS",
+  ]);
+});
+
 test("randomChars 生成不重复的随机后缀", () => {
   const values = new Set(Array.from({ length: 100 }, () => randomChars()));
   assert.equal(values.size, 100);
@@ -248,6 +257,39 @@ test("createAndSetupTsConfig 未设置 skipLibCheck 时默认开启", () => {
 
     const config = JSON.parse(readFileSync(tmpPath, "utf8"));
     assert.equal(config.compilerOptions.skipLibCheck, true);
+  } finally {
+    process.chdir(prevCwd);
+    if (tmpPath) rmSync(tmpPath, { force: true });
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("createAndSetupTsConfig 尊重 extends 链上游 base 配置里的 skipLibCheck", () => {
+  const root = mkdtempSync(join(tmpdir(), "vtf-cfg-"));
+  const prevCwd = process.cwd();
+  let tmpPath: string | undefined;
+  try {
+    // skipLibCheck:false 写在被 extends 的 base 里，根配置本身不写
+    writeFileSync(
+      join(root, "base.json"),
+      JSON.stringify({ compilerOptions: { skipLibCheck: false } }),
+    );
+    writeFileSync(
+      join(root, "tsconfig.json"),
+      JSON.stringify({ extends: "./base.json", compilerOptions: { strict: true } }),
+    );
+
+    process.chdir(root);
+    try {
+      tmpPath = createAndSetupTsConfig(["good.ts"]);
+    } finally {
+      process.chdir(prevCwd);
+    }
+
+    const config = JSON.parse(readFileSync(tmpPath, "utf8"));
+    // 不能注入 skipLibCheck:true——tmp 子配置优先级高于 extends 的 base，
+    // 注入会静默覆盖用户在 base 里的显式 false；缺省时由 tsc 沿 extends 解析出 false
+    assert.equal(config.compilerOptions.skipLibCheck, undefined);
   } finally {
     process.chdir(prevCwd);
     if (tmpPath) rmSync(tmpPath, { force: true });

@@ -41,8 +41,13 @@ function bumpVersion(current, target) {
 }
 
 function npmWhoAmI() {
-  const r = spawnSync("npm", ["whoami"], { cwd: ROOT, encoding: "utf8" });
-  if (r.status !== 0) {
+  // Windows 上 npm 是 npm.cmd，不带 shell 的 spawnSync 会 ENOENT
+  const r = spawnSync("npm", ["whoami"], {
+    cwd: ROOT,
+    encoding: "utf8",
+    shell: process.platform === "win32",
+  });
+  if (r.error || r.status !== 0) {
     throw new Error("Not logged in to npm. Run `npm login` first.");
   }
   return r.stdout.trim();
@@ -80,6 +85,7 @@ if (willBump) {
   writePkg(pkg);
 }
 
+let committed = false;
 try {
   run("pnpm publish --no-git-checks");
   console.log(`\n✓ Published ${newVersion} to npm`);
@@ -87,11 +93,16 @@ try {
   if (shouldCommit && willBump) {
     run("git add package.json");
     run(`git commit -m "chore: bump version to ${newVersion}"`);
-    run("git push origin master");
-    console.log("\n✓ Committed and pushed version bump");
+    committed = true;
+    run(`git tag v${newVersion}`);
+    // push 当前分支（含 tag），不硬编码 master
+    run("git push origin HEAD --follow-tags");
+    console.log("\n✓ Committed, tagged and pushed version bump");
   }
 } catch (err) {
-  if (willBump) {
+  // 已 commit 的版本号不能回退（否则工作区与提交记录产生伪差异）；
+  // 仅在尚未 commit 时还原 package.json
+  if (willBump && !committed) {
     pkg.version = oldVersion;
     writePkg(pkg);
     console.log(`\n↺ Reverted package.json to ${oldVersion}`);

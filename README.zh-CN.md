@@ -56,6 +56,17 @@ npm 与 pnpm 都已支持。CLI 通过 `require.resolve` 定位已安装的 `vue
 }
 ```
 
+## 指定其他 tsconfig
+
+用 `-p` / `--project` 指定根目录 `tsconfig.json` 之外的配置——适合 monorepo 里的 `tsconfig.app.json` / `tsconfig.node.json` 等场景：
+
+```sh
+vue-tsc-files -p tsconfig.app.json src/App.vue
+vue-tsc-files --project=configs/tsconfig.app.json src/App.vue
+```
+
+临时 tsconfig 会创建在你指定的配置旁边，因此相对的 `extends`、`baseUrl`、`paths` 解析结果与原配置完全一致。
+
 ## 脱离 lint-staged 直接检查变更文件
 
 传入 `--changed` 可以让工具从 git 工作区自动收集文件列表，代替命令行传入。它遵循 `git status` 的语义：已修改、已新增、已重命名、已复制、未合并和未跟踪的 `.ts`/`.tsx`/`.vue` 文件都会被检查；已删除的文件被跳过。同时包含已暂存（index）和未暂存（worktree）两类变更。可以与 `--errors-in-changed-only` 组合：
@@ -89,6 +100,8 @@ vue-tsc-files --unstaged --errors-in-changed-only
 `skipLibCheck` 默认开启以加速检查；如果你的 tsconfig 显式设置了 `skipLibCheck`（无论 `true` 还是 `false`），以你的配置为准。
 
 临时 tsconfig 会创建在原 tsconfig 所在目录（用后删除），因此相对的 `extends`、`baseUrl`、`paths` 等基于路径的选项解析结果与你的原始配置完全一致。
+
+不会跟随项目 `references`：对 solution 风格的 tsconfig 做检查时，被引用项目的 composite/declaration 约束不会生效（检测到 references 时会打印提示）。
 
 ```javascript
 // example.d.ts

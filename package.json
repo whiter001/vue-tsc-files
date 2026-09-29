@@ -22,10 +22,10 @@
   "files": [
     "vue-tsc-files",
     "README.md",
+    "README.zh-CN.md",
     "LICENSE"
   ],
   "type": "module",
-  "main": "./vue-tsc-files",
   "publishConfig": {
     "access": "public",
     "registry": "https://registry.npmjs.org/"
@@ -37,7 +37,7 @@
     "fmt": "oxfmt --write",
     "fmt:check": "oxfmt --check",
     "check": "pnpm run lint && pnpm run fmt:check && npx tsc --noEmit",
-    "prepublishOnly": "pnpm run build",
+    "prepublishOnly": "pnpm run check && pnpm run test",
     "pretest": "pnpm run build",
     "test": "node --test \"test/*.test.ts\""
   },

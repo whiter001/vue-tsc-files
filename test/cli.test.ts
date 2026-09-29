@@ -273,6 +273,27 @@ test("检查结束后临时 tsconfig 文件被清理", () => {
   }
 });
 
+test("--changed 在仓库子目录运行时只收集该子目录的变更", () => {
+  const root = createGitFixture({
+    "sub/tsconfig.json": TSCONFIG,
+    "sub/good.ts": "const a: number = 1;\nexport default a;\n",
+    "other.ts": "const b: number = 1;\nexport default b;\n",
+  });
+  try {
+    // 子目录外的 other.ts 改坏 + 子目录内新增坏文件
+    writeFileSync(join(root, "other.ts"), 'const b: number = "x";\nexport default b;\n');
+    writeFileSync(join(root, "sub", "bad.ts"), 'const c: number = "y";\nexport default c;\n');
+
+    const result = runCli(join(root, "sub"), ["--changed"]);
+    assert.notEqual(result.status, 0);
+    assert.match(result.stdout, /bad\.ts\(\d+,\d+\): error TS2322/);
+    // 子目录外的变更不参与本次检查
+    assert.doesNotMatch(result.stdout, /other\.ts\(\d+,\d+\): error/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("--changed 收集工作区变更文件并检查", () => {
   const root = createGitFixture({
     "good.ts": "const a: number = 1;\nexport default a;\n",

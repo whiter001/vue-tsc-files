@@ -56,6 +56,17 @@ A failed type check (or a failed spawn) always exits with a non-zero code.
 }
 ```
 
+## Using a specific tsconfig
+
+Pass `-p` / `--project` to use a tsconfig other than the root `tsconfig.json` — useful in monorepos with e.g. `tsconfig.app.json` / `tsconfig.node.json`:
+
+```sh
+vue-tsc-files -p tsconfig.app.json src/App.vue
+vue-tsc-files --project=configs/tsconfig.app.json src/App.vue
+```
+
+The temporary tsconfig is created next to the one you specify, so relative `extends`, `baseUrl` and `paths` resolve exactly as they do for your own config.
+
 ## Type-check changed files without lint-staged
 
 Pass `--changed` to collect the file list from git instead of the command line. It uses `git status` semantics — modified, added, renamed, copied, unmerged and untracked `.ts`/`.tsx`/`.vue` files in the working tree are checked; deleted files are skipped. Both staged (index) and unstaged (worktree) changes are included. It can be combined with `--errors-in-changed-only`:
@@ -87,6 +98,8 @@ Flag "--noEmit" is always passed to underlying `vue-tsc` by default.
 `skipLibCheck` defaults to `true` for faster checks; an explicit `skipLibCheck` in your tsconfig (either `true` or `false`) always wins.
 
 The temporary tsconfig is created next to the original one (and removed afterwards), so relative `extends`, `baseUrl`, `paths` and other path-based options resolve exactly as they do for your own config.
+
+Project `references` are not followed: when checking a solution-style tsconfig, the composite/declaration constraints of referenced projects are not applied (a note is printed when references are detected).
 
 ```javascript
 // example.d.ts

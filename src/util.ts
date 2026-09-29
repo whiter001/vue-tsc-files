@@ -1,4 +1,4 @@
-import { writeFileSync, unlinkSync } from "fs";
+import { writeFileSync, unlinkSync, existsSync } from "fs";
 import { dirname, join, resolve, relative } from "path";
 import { randomBytes } from "crypto";
 import { spawnSync } from "child_process";
@@ -115,23 +115,17 @@ export function setupArgs() {
   }
 
   const specifiedFiles = [...new Set(explicitFiles)];
-  if (changed) {
-    for (const file of getChangedFiles()) {
-      if (!specifiedFiles.includes(file)) {
-        specifiedFiles.push(file);
-      }
-    }
-  }
-  if (staged) {
-    for (const file of getStagedFiles()) {
-      if (!specifiedFiles.includes(file)) {
-        specifiedFiles.push(file);
-      }
-    }
-  }
-  if (unstaged) {
-    for (const file of getUnstagedFiles()) {
-      if (!specifiedFiles.includes(file)) {
+  const seen = new Set(specifiedFiles);
+  const collectors = [
+    [changed, getChangedFiles],
+    [staged, getStagedFiles],
+    [unstaged, getUnstagedFiles],
+  ] as const;
+  for (const [enabled, collect] of collectors) {
+    if (!enabled) continue;
+    for (const file of collect()) {
+      if (!seen.has(file)) {
+        seen.add(file);
         specifiedFiles.push(file);
       }
     }
@@ -168,37 +162,37 @@ export function randomChars() {
 }
 
 /**
- * Collects the project's .d.ts files using the tsconfig's own include/exclude/
- * files scope (extends chains resolved by the TypeScript parser), so global
- * declarations are available without pulling in declarations the project
- * itself would never compile.
+ * Parses the project config using the TypeScript parser, with extends chains
+ * resolved. Used both to collect .d.ts files within the tsconfig's own
+ * include/exclude/files scope (so declarations the project itself would never
+ * compile are not pulled in) and to inspect resolved compilerOptions.
  *
  * @param tsconfigPath - The absolute path of the root tsconfig.json.
- * @returns Absolute paths of the .d.ts files in the project's file set.
+ * @returns The parsed project config (file set + resolved compilerOptions),
+ *   or undefined when the config cannot be parsed.
  */
-function getProjectDtsFiles(tsconfigPath: string): string[] {
-  const parsed = ts.getParsedCommandLineOfConfigFile(tsconfigPath, undefined, {
+function getParsedProjectConfig(tsconfigPath: string): ts.ParsedCommandLine | undefined {
+  return ts.getParsedCommandLineOfConfigFile(tsconfigPath, undefined, {
     ...ts.sys,
     // 配置文件此前已成功读取，这里不会再触发不可恢复诊断
     onUnRecoverableConfigFileDiagnostic: () => {},
   });
-  if (!parsed) {
-    return [];
-  }
-  return parsed.fileNames.filter((name) => name.endsWith(".d.ts"));
 }
 
 /**
  * Returns whether the argument is a file with a supported extension.
+ * Case-insensitive: Windows/macOS 文件系统不区分大小写，git 可能报告
+ * Foo.TS / Bar.Vue 这样的路径，漏检会让 CI 假绿。
  * @param arg - The argument to check.
  */
 export function isTscFile(arg: string) {
+  const lower = arg.toLowerCase();
   return (
-    arg.endsWith(".vue") ||
-    arg.endsWith(".ts") ||
-    arg.endsWith(".tsx") ||
-    arg.endsWith(".mts") ||
-    arg.endsWith(".cts")
+    lower.endsWith(".vue") ||
+    lower.endsWith(".ts") ||
+    lower.endsWith(".tsx") ||
+    lower.endsWith(".mts") ||
+    lower.endsWith(".cts")
   );
 }
 
@@ -245,10 +239,15 @@ const GIT_TIMEOUT_MS = 30_000;
 
 /**
  * Runs a git command and returns its stdout, exiting with a clear message on
- * failure or timeout.
+ * failure or timeout. maxBuffer 放宽到 64MB：未忽略文件多的大仓库下
+ * `git status -uall -z` 输出可能超过默认 1MB 上限导致子进程被杀。
  */
 function runGit(args: string[], failureHint: string): string {
-  const result = spawnSync("git", args, { encoding: "utf8", timeout: GIT_TIMEOUT_MS });
+  const result = spawnSync("git", args, {
+    encoding: "utf8",
+    timeout: GIT_TIMEOUT_MS,
+    maxBuffer: 64 * 1024 * 1024,
+  });
   if (result.error && (result.error as NodeJS.ErrnoException).code === "ETIMEDOUT") {
     console.error(
       `git ${args[0]} timed out after ${GIT_TIMEOUT_MS / 1000}s. ` +
@@ -264,26 +263,34 @@ function runGit(args: string[], failureHint: string): string {
 }
 
 /**
- * Returns the absolute path of the git repository root.
+ * Returns the absolute path of the git repository root. 缓存在模块级：
+ * --changed/--staged/--unstaged 混用时不必重复 spawn git rev-parse。
  */
+let cachedRepoRoot: string | undefined;
 function getRepoRoot(): string {
-  return runGit(
-    ["rev-parse", "--show-toplevel"],
-    "Failed to locate the git repository root. --changed/--staged/--unstaged must be used inside a git repository",
-  ).trim();
+  if (!cachedRepoRoot) {
+    cachedRepoRoot = runGit(
+      ["rev-parse", "--show-toplevel"],
+      "Failed to locate the git repository root. --changed/--staged/--unstaged must be used inside a git repository",
+    ).trim();
+  }
+  return cachedRepoRoot;
 }
 
 /**
  * Converts repository-root-relative git paths to cwd-relative ones and drops
  * entries that must never be type-checked. 未跟踪的 node_modules 在 -uall
  * 下会逐文件展开，可能产生几十万行输出；正解是 .gitignore，这里兜底直接
- * 丢弃（依赖文件本就不该参与检查）。
+ * 丢弃（依赖文件本就不该参与检查）。已不存在的文件（如冲突状态 DU/UD 中
+ * 一侧已删除）同样剔除，否则 vue-tsc 的 "file not found" 会被归为全局
+ * 错误导致误失败。
  */
 function toCheckableFiles(repoRoot: string, gitPaths: string[]): string[] {
   return gitPaths
     .map((path) => relative(process.cwd(), resolve(repoRoot, path)))
     .filter((path) => !path.split(/[\\/]/).includes("node_modules"))
-    .filter(isTscFile);
+    .filter(isTscFile)
+    .filter((path) => existsSync(resolve(process.cwd(), path)));
 }
 
 /**
@@ -374,15 +381,24 @@ function getRootTsConfig(tsconfigPath: string): TSConfig {
  * @param rootTsConfig The root TypeScript configuration.
  * @param files The list of files to include in the temporary configuration.
  * @param configDir The directory the original tsconfig lives in.
+ * @param userSkipLibCheck The skipLibCheck value resolved through the full
+ *   extends chain; the default `true` is only injected when the user has not
+ *   set it anywhere (undefined).
  * @returns The path of the created temporary TypeScript configuration file.
  */
-function createTmpTsConfig(rootTsConfig: TSConfig, files: string[], configDir: string) {
+function createTmpTsConfig(
+  rootTsConfig: TSConfig,
+  files: string[],
+  configDir: string,
+  userSkipLibCheck?: boolean,
+) {
   const tmpTsconfigPath = join(configDir, `tsconfig.${randomChars()}.json`);
   const tmpTsconfig = {
     ...rootTsConfig,
     compilerOptions: {
-      // 默认开启 skipLibCheck 加速检查；用户显式配置（true/false）优先
-      skipLibCheck: true,
+      // 默认开启 skipLibCheck 加速检查；用户显式配置（true/false）优先，
+      // 包括写在 extends 链上游 base 配置里的情况
+      ...(userSkipLibCheck === undefined ? { skipLibCheck: true } : {}),
       ...rootTsConfig.compilerOptions,
     },
     // files 按 tmp tsconfig 所在目录解析，统一写成绝对路径，
@@ -404,21 +420,27 @@ const SIGNAL_EXIT_CODES = {
   SIGTERM: 143,
 } as const;
 
+/** 待清理的临时 tsconfig 路径；监听器全局只注册一次，避免多次调用累积 listener */
+const tmpTsconfigPaths = new Set<string>();
+let cleanupHandlersRegistered = false;
+
 /**
  * Registers a cleanup handler to remove a temporary tsconfig file.
  *
  * @param tmpTsconfigPath - The path of the temporary tsconfig file.
  */
 function registerCleanupHandler(tmpTsconfigPath: string) {
-  let didCleanup = false;
-  const cleanup = () => {
-    if (didCleanup) return;
-    didCleanup = true;
+  tmpTsconfigPaths.add(tmpTsconfigPath);
+  if (cleanupHandlersRegistered) return;
+  cleanupHandlersRegistered = true;
 
-    try {
-      unlinkSync(tmpTsconfigPath);
-    } catch {
-      // 临时文件可能已被清理，忽略
+  const cleanup = () => {
+    for (const path of tmpTsconfigPaths) {
+      try {
+        unlinkSync(path);
+      } catch {
+        // 临时文件可能已被清理，忽略
+      }
     }
   };
 
@@ -444,11 +466,23 @@ export function createAndSetupTsConfig(files: string[], argsProjectValue?: strin
     ? resolve(process.cwd(), argsProjectValue)
     : resolveFromRoot("tsconfig.json");
   const rootTsConfig = getRootTsConfig(tsconfigPath);
-  const dtsFiles = getProjectDtsFiles(tsconfigPath);
+  const parsed = getParsedProjectConfig(tsconfigPath);
+  const dtsFiles = parsed?.fileNames.filter((name) => name.endsWith(".d.ts")) ?? [];
+
+  // @json-types/tsconfig 的 TSConfig 不含 references 字段，按结构类型探测
+  const references = (rootTsConfig as { references?: unknown[] }).references;
+  if (Array.isArray(references) && references.length > 0) {
+    console.error(
+      "Note: this tsconfig uses project references; referenced projects are not " +
+        "followed, so composite/declaration constraints of the solution are not applied.",
+    );
+  }
+
   const tmpTsconfigPath = createTmpTsConfig(
     rootTsConfig,
     [...files, ...dtsFiles],
     dirname(tsconfigPath),
+    parsed?.options.skipLibCheck,
   );
 
   return tmpTsconfigPath;

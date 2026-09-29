@@ -2,12 +2,14 @@ import { defineConfig } from "rolldown";
 
 export default defineConfig({
   input: "src/cli.ts",
+  platform: "node",
   output: {
     file: "vue-tsc-files",
     format: "es",
-    minify: true,
+    // 产物只有几 KB，minify 收益可忽略，反而让崩溃栈落在单行不可定位
+    minify: false,
   },
-  // rolldown 原生支持 TS 转译与 ESM minify，无需额外插件
-  // 保留 shebang 让 npm i -g 后生成可执行的 vue-tsc-files 命令
-  external: ["fs", "path", "crypto", "module", "child_process", "typescript"],
+  // platform: "node" 自动 external 所有 Node 内置模块（含 node: 前缀写法）；
+  // typescript 是 peerDependency，由消费者项目提供
+  external: ["typescript"],
 });
