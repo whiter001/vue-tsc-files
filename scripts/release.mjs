@@ -52,7 +52,9 @@ function npmWhoAmI(registry) {
     shell: process.platform === "win32",
   });
   if (r.error || r.status !== 0) {
-    throw new Error(`Not logged in to npm (${registry ?? "default registry"}). Run \`npm login\` first.`);
+    throw new Error(
+      `Not logged in to npm (${registry ?? "default registry"}). Run \`npm login\` first.`,
+    );
   }
   return r.stdout.trim();
 }
