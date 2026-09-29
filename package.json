@@ -38,6 +38,7 @@
     "fmt:check": "oxfmt --check",
     "check": "pnpm run lint && pnpm run fmt:check && npx tsc --noEmit",
     "prepublishOnly": "pnpm run build",
+    "pretest": "pnpm run build",
     "test": "node --test \"test/*.test.ts\""
   },
   "devDependencies": {

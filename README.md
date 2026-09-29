@@ -82,7 +82,11 @@ Explicitly passed files, `--changed`, `--staged` and `--unstaged` can be mixed (
 
 Flag "--noEmit" is always passed to underlying `vue-tsc` by default.
 
-`vue-tsc-files` passes module declarations and namespaces from `d.ts` files to `vue-tsc`, so please make sure that needed declarations are inside `d.ts` files. The `d.ts` scan skips `node_modules`, dot directories (`.git`, `.github`, ...) and common build outputs (`dist`, `build`, `out`, `coverage`).
+`vue-tsc-files` passes module declarations and namespaces from `d.ts` files to `vue-tsc`, so please make sure that needed declarations are inside `d.ts` files. The `d.ts` files are collected using your tsconfig's own `include`/`exclude`/`files` scope (`extends` chains included), so declarations the project itself would not compile are not pulled in.
+
+`skipLibCheck` defaults to `true` for faster checks; an explicit `skipLibCheck` in your tsconfig (either `true` or `false`) always wins.
+
+The temporary tsconfig is created next to the original one (and removed afterwards), so relative `extends`, `baseUrl`, `paths` and other path-based options resolve exactly as they do for your own config.
 
 ```javascript
 // example.d.ts
@@ -95,13 +99,13 @@ declare module "@vue/runtime-core" {
 
 ## Development
 
-Requires Node >= 22.18 (tests rely on built-in TypeScript type stripping).
+Runtime requirement is Node >= 20.19 (the `engines` field, applies to the published CLI). Development requires Node >= 22.18 because the tests run TypeScript sources via Node's built-in type stripping — the stricter version does not apply to end users.
 
 ```sh
 pnpm install
-pnpm build      # rolldown → bin/cli.js
+pnpm build      # rolldown → vue-tsc-files
 pnpm check      # oxlint + oxfmt --check + tsc --noEmit
-pnpm test       # node:test unit + integration tests
+pnpm test       # builds first (pretest), then node:test unit + integration tests
 ```
 
 ## License

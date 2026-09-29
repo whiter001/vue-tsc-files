@@ -5,6 +5,7 @@ import { mkdtempSync, mkdirSync, writeFileSync, rmSync, readdirSync } from "fs";
 import { tmpdir } from "os";
 import { join, dirname } from "path";
 import { fileURLToPath } from "url";
+import { stripAnsiCodes } from "../src/util.ts";
 
 const CLI = join(dirname(fileURLToPath(import.meta.url)), "..", "vue-tsc-files");
 
@@ -153,6 +154,77 @@ test("--errors-in-changed-only 支持含空格的文件路径", () => {
     // 含空格的指定文件自身错误仍然算数
     const counted = runCli(root, ["--errors-in-changed-only", "src/my dep.ts"]);
     assert.notEqual(counted.status, 0);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("--errors-in-changed-only 转发 --pretty 时错误归属仍然正确", () => {
+  const root = createFixture({
+    "good.ts": 'import a from "./dep";\nexport default a;\n',
+    "dep.ts": 'const a: number = "x";\nexport default a;\n',
+  });
+  try {
+    // 传递依赖的错误在 --pretty 输出格式下同样被忽略
+    const lenient = runCli(root, ["--errors-in-changed-only", "--pretty", "good.ts"]);
+    assert.equal(lenient.status, 0, lenient.stderr);
+    assert.match(lenient.stderr, /--errors-in-changed-only/);
+
+    // 指定文件自身的错误在 --pretty 下仍然算数
+    const strict = runCli(root, ["--errors-in-changed-only", "--pretty", "dep.ts"]);
+    assert.notEqual(strict.status, 0);
+    assert.match(stripAnsiCodes(strict.stdout), /error TS2322/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("-p 指向子目录 tsconfig 时 extends 相对路径正常解析", () => {
+  const root = createFixture({
+    "good.ts": "const a: number = 1;\nexport default a;\n",
+    "configs/base.json": JSON.stringify({ compilerOptions: { strict: true } }),
+    "configs/tsconfig.json": JSON.stringify({ extends: "./base.json" }),
+  });
+  try {
+    const result = runCli(root, ["good.ts", "-p", "configs/tsconfig.json"]);
+    assert.equal(result.status, 0, result.stderr + result.stdout);
+    // 子目录里的临时配置也被清理
+    const leftovers = readdirSync(join(root, "configs")).filter((f) =>
+      /^tsconfig\..+\.json$/.test(f),
+    );
+    assert.deepEqual(leftovers, []);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("-p 缺少路径参数时给出错误提示并以 1 退出", () => {
+  const root = createFixture({
+    "good.ts": "const a: number = 1;\nexport default a;\n",
+  });
+  try {
+    const result = runCli(root, ["good.ts", "-p"]);
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /requires a tsconfig path/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("用户显式 skipLibCheck:false 时不被强制覆盖", () => {
+  const root = createFixture({
+    "good.ts": "const a: number = 1;\nexport default a;\n",
+    // 声明文件内的错误只有 skipLibCheck:false 时才会被检查出来
+    "bad.d.ts": "type T = NotDefined;\n",
+  });
+  try {
+    writeFileSync(
+      join(root, "tsconfig.json"),
+      JSON.stringify({ compilerOptions: { strict: true, skipLibCheck: false } }),
+    );
+    const result = runCli(root, ["good.ts"]);
+    assert.notEqual(result.status, 0);
+    assert.match(result.stdout, /error TS2304/);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

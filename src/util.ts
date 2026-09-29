@@ -1,5 +1,5 @@
-import { readdirSync, lstatSync, writeFileSync, unlinkSync } from "fs";
-import { join, resolve, relative } from "path";
+import { writeFileSync, unlinkSync } from "fs";
+import { dirname, join, resolve, relative } from "path";
 import { randomBytes } from "crypto";
 import { spawnSync } from "child_process";
 import ts from "typescript";
@@ -37,7 +37,7 @@ File collection:
                               (git diff; untracked files are not included)
 
 Flags:
-  -p, --project <path>        Use a specific tsconfig.json
+  -p, --project <path>        Use a specific tsconfig.json (--project=<path> also works)
   --errors-in-changed-only    Only errors in the specified files (plus global
                               config errors) affect the exit code; errors in
                               transitively compiled files are printed but ignored
@@ -75,8 +75,21 @@ export function setupArgs() {
       process.exit(0);
     }
     if (arg === "-p" || arg === "--project") {
-      projectValue = args[i + 1];
+      const value = args[i + 1];
+      if (value === undefined) {
+        console.error(`${arg} requires a tsconfig path argument.`);
+        process.exit(1);
+      }
+      projectValue = value;
       i++;
+      continue;
+    }
+    if (arg.startsWith("--project=") || arg.startsWith("-p=")) {
+      projectValue = arg.slice(arg.indexOf("=") + 1);
+      if (!projectValue) {
+        console.error(`${arg} requires a non-empty tsconfig path.`);
+        process.exit(1);
+      }
       continue;
     }
     if (ERRORS_IN_CHANGED_ONLY_FLAGS.has(arg)) {
@@ -132,7 +145,7 @@ export function setupArgs() {
     process.exit(0);
   }
 
-  const files = [...specifiedFiles, ...getDtsFiles(process.cwd())];
+  const files = [...specifiedFiles];
 
   return {
     files,
@@ -154,33 +167,25 @@ export function randomChars() {
   return randomBytes(8).toString("hex");
 }
 
-/** 扫描 d.ts 时跳过的目录：依赖、VCS 元数据和常见构建产物目录 */
-const DTS_SCAN_IGNORED_DIRS = new Set(["node_modules", "dist", "build", "out", "coverage"]);
-
 /**
- * Retrieves an array of .d.ts files recursively from the specified directory.
- * Dot directories (.git, .github, ...) and common build outputs are skipped
- * to avoid wasted IO and duplicate declarations from generated files.
+ * Collects the project's .d.ts files using the tsconfig's own include/exclude/
+ * files scope (extends chains resolved by the TypeScript parser), so global
+ * declarations are available without pulling in declarations the project
+ * itself would never compile.
  *
- * @param dir - The directory to search for .d.ts files.
- * @returns An array of .d.ts file paths.
+ * @param tsconfigPath - The absolute path of the root tsconfig.json.
+ * @returns Absolute paths of the .d.ts files in the project's file set.
  */
-export function getDtsFiles(dir: string): string[] {
-  const files = readdirSync(dir);
-  return files.reduce<string[]>((acc: string[], file: string) => {
-    const path = `${dir}/${file}`;
-    const isDirectory = lstatSync(path).isDirectory();
-    if (isDirectory) {
-      if (file.startsWith(".") || DTS_SCAN_IGNORED_DIRS.has(file)) {
-        return acc;
-      }
-      return [...acc, ...getDtsFiles(path)];
-    }
-    if (path.endsWith(".d.ts")) {
-      return [...acc, path];
-    }
-    return acc;
-  }, []);
+function getProjectDtsFiles(tsconfigPath: string): string[] {
+  const parsed = ts.getParsedCommandLineOfConfigFile(tsconfigPath, undefined, {
+    ...ts.sys,
+    // 配置文件此前已成功读取，这里不会再触发不可恢复诊断
+    onUnRecoverableConfigFileDiagnostic: () => {},
+  });
+  if (!parsed) {
+    return [];
+  }
+  return parsed.fileNames.filter((name) => name.endsWith(".d.ts"));
 }
 
 /**
@@ -347,11 +352,10 @@ export function resolveFromRoot(...paths: string[]) {
  * commas are supported without eval, and malformed configs produce a proper
  * diagnostic instead of a stack trace.
  *
- * @param argsProjectValue - Optional path to a specific tsconfig.json file.
+ * @param tsconfigPath - The resolved path of the tsconfig.json file.
  * @returns The parsed TSConfig object.
  */
-function getRootTsConfig(argsProjectValue?: string): TSConfig {
-  const tsconfigPath = argsProjectValue || resolveFromRoot("tsconfig.json");
+function getRootTsConfig(tsconfigPath: string): TSConfig {
   const result = ts.readConfigFile(tsconfigPath, ts.sys.readFile);
 
   if (result.error) {
@@ -364,20 +368,26 @@ function getRootTsConfig(argsProjectValue?: string): TSConfig {
 }
 
 /**
- * Creates a temporary TypeScript configuration file.
+ * Creates a temporary TypeScript configuration file next to the original
+ * tsconfig, so relative `extends`, `baseUrl`, `paths`, `typeRoots` etc.
+ * resolve against the same directory as the user's config.
  * @param rootTsConfig The root TypeScript configuration.
  * @param files The list of files to include in the temporary configuration.
+ * @param configDir The directory the original tsconfig lives in.
  * @returns The path of the created temporary TypeScript configuration file.
  */
-function createTmpTsConfig(rootTsConfig: TSConfig, files: string[]) {
-  const tmpTsconfigPath = resolveFromRoot(`tsconfig.${randomChars()}.json`);
+function createTmpTsConfig(rootTsConfig: TSConfig, files: string[], configDir: string) {
+  const tmpTsconfigPath = join(configDir, `tsconfig.${randomChars()}.json`);
   const tmpTsconfig = {
     ...rootTsConfig,
     compilerOptions: {
-      ...rootTsConfig.compilerOptions,
+      // 默认开启 skipLibCheck 加速检查；用户显式配置（true/false）优先
       skipLibCheck: true,
+      ...rootTsConfig.compilerOptions,
     },
-    files,
+    // files 按 tmp tsconfig 所在目录解析，统一写成绝对路径，
+    // 避免 -p 指向子目录 tsconfig 时 cwd 相对路径错位
+    files: files.map((file) => resolve(process.cwd(), file)),
     include: [],
   };
   writeFileSync(tmpTsconfigPath, JSON.stringify(tmpTsconfig, null, 2));
@@ -430,16 +440,37 @@ function registerCleanupHandler(tmpTsconfigPath: string) {
  * @returns The path of the temporary tsconfig file.
  */
 export function createAndSetupTsConfig(files: string[], argsProjectValue?: string) {
-  const rootTsConfig = getRootTsConfig(argsProjectValue);
-  const tmpTsconfigPath = createTmpTsConfig(rootTsConfig, files);
+  const tsconfigPath = argsProjectValue
+    ? resolve(process.cwd(), argsProjectValue)
+    : resolveFromRoot("tsconfig.json");
+  const rootTsConfig = getRootTsConfig(tsconfigPath);
+  const dtsFiles = getProjectDtsFiles(tsconfigPath);
+  const tmpTsconfigPath = createTmpTsConfig(
+    rootTsConfig,
+    [...files, ...dtsFiles],
+    dirname(tsconfigPath),
+  );
 
   return tmpTsconfigPath;
 }
 
 /** 带位置信息的诊断行，如 src/a.ts(12,5): error TS2322: ... */
 const LOCATED_ERROR_RE = /^(.+?)\(\d+,\d+\): error TS\d+:/;
+/** --pretty 输出中带位置信息的诊断行，如 src/a.ts:12:5 - error TS2322: ... */
+const PRETTY_LOCATED_ERROR_RE = /^(.+?):\d+:\d+ - error TS\d+:/;
 /** 不带文件位置的全局错误，如 error TS5083: Cannot read file ... */
 const GLOBAL_ERROR_RE = /^error TS\d+:/;
+
+// oxlint-disable-next-line no-control-regex -- 匹配 ANSI SGR 序列必须包含 ESC 控制符
+const ANSI_ESCAPE_RE = /[[0-9;]*m/g;
+
+/**
+ * Removes ANSI SGR color/style sequences. --pretty 转给 tsc 后诊断行的
+ * "error TSxxxx:" 本身也带色码，不去除会让所有正则归属判断失效。
+ */
+export function stripAnsiCodes(text: string): string {
+  return text.replace(ANSI_ESCAPE_RE, "");
+}
 
 /**
  * Normalizes a diagnostic file path for comparison with the specified files.
@@ -478,8 +509,8 @@ export function filterErrorsInFiles(output: string, specifiedFiles: string[]): E
   const globalErrors: string[] = [];
 
   for (const line of output.split(/\r?\n/)) {
-    const trimmed = line.trim();
-    const located = LOCATED_ERROR_RE.exec(trimmed);
+    const trimmed = stripAnsiCodes(line).trim();
+    const located = LOCATED_ERROR_RE.exec(trimmed) ?? PRETTY_LOCATED_ERROR_RE.exec(trimmed);
     if (located) {
       if (targets.has(normalizeDiagnosticPath(located[1]))) {
         errorsInSpecifiedFiles.push(line);

@@ -84,7 +84,11 @@ vue-tsc-files --unstaged --errors-in-changed-only
 
 默认会向底层 `vue-tsc` 始终传入 `--noEmit`。
 
-`vue-tsc-files` 会把 `d.ts` 文件里的模块声明和命名空间传给 `vue-tsc`，请确保所需声明位于 `d.ts` 文件中。`d.ts` 扫描会跳过 `node_modules`、点开头的目录（`.git`、`.github` 等）以及常见构建产物目录（`dist`、`build`、`out`、`coverage`）。
+`vue-tsc-files` 会把 `d.ts` 文件里的模块声明和命名空间传给 `vue-tsc`，请确保所需声明位于 `d.ts` 文件中。`d.ts` 的收集遵循你的 tsconfig 自身的 `include`/`exclude`/`files` 范围（含 `extends` 链），项目本身不会编译的声明文件不会被拉进来。
+
+`skipLibCheck` 默认开启以加速检查；如果你的 tsconfig 显式设置了 `skipLibCheck`（无论 `true` 还是 `false`），以你的配置为准。
+
+临时 tsconfig 会创建在原 tsconfig 所在目录（用后删除），因此相对的 `extends`、`baseUrl`、`paths` 等基于路径的选项解析结果与你的原始配置完全一致。
 
 ```javascript
 // example.d.ts
@@ -97,13 +101,13 @@ declare module "@vue/runtime-core" {
 
 ## 开发
 
-需要 Node >= 22.18（测试依赖内置的 TypeScript 类型剥离）。
+运行时要求是 Node >= 20.19（`engines` 字段，面向使用已发布 CLI 的用户）。开发需要 Node >= 22.18，因为测试直接通过 Node 内置的类型剥离运行 TypeScript 源码——这个更高的版本要求不面向最终用户。
 
 ```sh
 pnpm install
-pnpm build      # rolldown → bin/cli.js
+pnpm build      # rolldown → vue-tsc-files
 pnpm check      # oxlint + oxfmt --check + tsc --noEmit
-pnpm test       # node:test unit + integration tests
+pnpm test       # 先构建（pretest），再跑 node:test 单元 + 集成测试
 ```
 
 ## License
