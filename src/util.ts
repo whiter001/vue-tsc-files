@@ -462,7 +462,7 @@ const PRETTY_LOCATED_ERROR_RE = /^(.+?):\d+:\d+ - error TS\d+:/;
 const GLOBAL_ERROR_RE = /^error TS\d+:/;
 
 // oxlint-disable-next-line no-control-regex -- 匹配 ANSI SGR 序列必须包含 ESC 控制符
-const ANSI_ESCAPE_RE = /[[0-9;]*m/g;
+const ANSI_ESCAPE_RE = /\x1b\[[0-9;]*m/g;
 
 /**
  * Removes ANSI SGR color/style sequences. --pretty 转给 tsc 后诊断行的
