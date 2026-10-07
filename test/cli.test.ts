@@ -211,6 +211,33 @@ test("-p 缺少路径参数时给出错误提示并以 1 退出", () => {
   }
 });
 
+test("-p/--project 传目录时读取其中的 tsconfig.json", () => {
+  const root = createFixture({
+    "good.ts": "const a: number = 1;\nexport default a;\n",
+  });
+  try {
+    const dashP = runCli(root, ["good.ts", "-p", "."]);
+    assert.equal(dashP.status, 0, dashP.stderr + dashP.stdout);
+
+    const joined = runCli(root, ["good.ts", "--project=."]);
+    assert.equal(joined.status, 0, joined.stderr + joined.stdout);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("-p 指向的目录里没有 tsconfig.json 时报错并以 1 退出", () => {
+  const root = mkdtempSync(join(tmpdir(), "vtf-it-"));
+  writeFileSync(join(root, "good.ts"), "export default 1;\n");
+  try {
+    const result = runCli(root, ["good.ts", "-p", "."]);
+    assert.equal(result.status, 1);
+    assert.match(result.stderr + result.stdout, /Failed to read/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("用户显式 skipLibCheck:false 时不被强制覆盖", () => {
   const root = createFixture({
     "good.ts": "const a: number = 1;\nexport default a;\n",
@@ -237,6 +264,24 @@ test("缺少 tsconfig 时给出友好提示并以 1 退出", () => {
     const result = runCli(root, ["good.ts"]);
     assert.equal(result.status, 1);
     assert.match(result.stderr + result.stdout, /Failed to read/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("无有效文件参数时以 1 退出并输出用法指引", () => {
+  const root = createFixture({
+    "good.ts": "const a: number = 1;\nexport default a;\n",
+    "good.js": "export default 1;\n",
+  });
+  try {
+    // 完全没传文件、参数全被扩展名过滤掉、传目录：都是用法错误，
+    // 且发生在读取 tsconfig 之前
+    for (const args of [[], ["good.js"], ["."]]) {
+      const result = runCli(root, args);
+      assert.equal(result.status, 1, `args: ${JSON.stringify(args)} ${result.stderr}`);
+      assert.match(result.stderr, /No files to check/);
+    }
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

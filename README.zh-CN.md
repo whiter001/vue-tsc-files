@@ -42,7 +42,7 @@ pnpm add -D vue-tsc typescript
 
 npm 与 pnpm 都已支持。CLI 通过 `require.resolve` 定位已安装的 `vue-tsc` 包，再用当前 Node 可执行文件调用其 JS 入口，因此完全兼容 pnpm 的符号链接 `node_modules` 布局。
 
-类型检查失败（或子进程启动失败）会以非零退出码退出。
+类型检查失败（或子进程启动失败）会以非零退出码退出。若最终没有任何可检查文件且未带 `--changed`/`--staged`/`--unstaged`，属于用法错误，以退出码 1 退出。
 
 ## 只对指定文件自身的错误失败
 
@@ -58,11 +58,12 @@ npm 与 pnpm 都已支持。CLI 通过 `require.resolve` 定位已安装的 `vue
 
 ## 指定其他 tsconfig
 
-用 `-p` / `--project` 指定根目录 `tsconfig.json` 之外的配置——适合 monorepo 里的 `tsconfig.app.json` / `tsconfig.node.json` 等场景：
+用 `-p` / `--project` 指定根目录 `tsconfig.json` 之外的配置——适合 monorepo 里的 `tsconfig.app.json` / `tsconfig.node.json` 等场景。路径也可以是目录，此时读取其中的 `tsconfig.json`（与 `tsc -p .` 一致）：
 
 ```sh
 vue-tsc-files -p tsconfig.app.json src/App.vue
 vue-tsc-files --project=configs/tsconfig.app.json src/App.vue
+vue-tsc-files -p . src/App.vue
 ```
 
 临时 tsconfig 会创建在你指定的配置旁边，因此相对的 `extends`、`baseUrl`、`paths` 解析结果与原配置完全一致。

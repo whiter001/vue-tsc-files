@@ -42,7 +42,7 @@ With lint-staged:
 
 Works with npm and pnpm. The CLI locates the installed `vue-tsc` package via `require.resolve` and executes its JS entry with the current Node binary, so pnpm's symlinked `node_modules` layout is fully supported.
 
-A failed type check (or a failed spawn) always exits with a non-zero code.
+A failed type check (or a failed spawn) always exits with a non-zero code. When no checkable files are found and none of `--changed`/`--staged`/`--unstaged` was passed, that is a usage error and the CLI exits with code 1.
 
 ## Only fail on errors in the specified files
 
@@ -58,11 +58,12 @@ A failed type check (or a failed spawn) always exits with a non-zero code.
 
 ## Using a specific tsconfig
 
-Pass `-p` / `--project` to use a tsconfig other than the root `tsconfig.json` — useful in monorepos with e.g. `tsconfig.app.json` / `tsconfig.node.json`:
+Pass `-p` / `--project` to use a tsconfig other than the root `tsconfig.json` — useful in monorepos with e.g. `tsconfig.app.json` / `tsconfig.node.json`. The path may also be a directory, which resolves to the `tsconfig.json` inside it (like `tsc -p .`):
 
 ```sh
 vue-tsc-files -p tsconfig.app.json src/App.vue
 vue-tsc-files --project=configs/tsconfig.app.json src/App.vue
+vue-tsc-files -p . src/App.vue
 ```
 
 The temporary tsconfig is created next to the one you specify, so relative `extends`, `baseUrl` and `paths` resolve exactly as they do for your own config.

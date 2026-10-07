@@ -1,4 +1,4 @@
-import { writeFileSync, unlinkSync, existsSync } from "fs";
+import { writeFileSync, unlinkSync, existsSync, statSync } from "fs";
 import { dirname, join, resolve, relative } from "path";
 import { randomBytes } from "crypto";
 import { spawnSync } from "child_process";
@@ -135,8 +135,13 @@ export function setupArgs() {
     if (changed || staged || unstaged) {
       const source = changed ? "changed" : staged ? "staged" : "unstaged";
       console.log(`No ${source} files to type-check`);
+      process.exit(0);
     }
-    process.exit(0);
+    // 用法错误不能静默 exit 0，否则 CI 门禁假绿
+    console.error(
+      "No files to check: pass .vue/.ts/.tsx/.mts/.cts files, or use --changed/--staged/--unstaged.",
+    );
+    process.exit(1);
   }
 
   const files = [...specifiedFiles];
@@ -462,9 +467,14 @@ function registerCleanupHandler(tmpTsconfigPath: string) {
  * @returns The path of the temporary tsconfig file.
  */
 export function createAndSetupTsConfig(files: string[], argsProjectValue?: string) {
-  const tsconfigPath = argsProjectValue
+  let tsconfigPath = argsProjectValue
     ? resolve(process.cwd(), argsProjectValue)
     : resolveFromRoot("tsconfig.json");
+  // 对齐 tsc 的 -p 语义：传目录时读取其中的 tsconfig.json；
+  // 目录里没有 tsconfig.json 时不特殊处理，让读取失败的报错自然发生
+  if (statSync(tsconfigPath, { throwIfNoEntry: false })?.isDirectory()) {
+    tsconfigPath = join(tsconfigPath, "tsconfig.json");
+  }
   const rootTsConfig = getRootTsConfig(tsconfigPath);
   const parsed = getParsedProjectConfig(tsconfigPath);
   const dtsFiles = parsed?.fileNames.filter((name) => name.endsWith(".d.ts")) ?? [];

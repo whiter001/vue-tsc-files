@@ -296,3 +296,32 @@ test("createAndSetupTsConfig 尊重 extends 链上游 base 配置里的 skipLibC
     rmSync(root, { recursive: true, force: true });
   }
 });
+
+test("createAndSetupTsConfig project 传目录时读取其中的 tsconfig.json", () => {
+  const root = mkdtempSync(join(tmpdir(), "vtf-cfg-"));
+  const prevCwd = process.cwd();
+  let tmpPath: string | undefined;
+  try {
+    writeFileSync(
+      join(root, "tsconfig.json"),
+      JSON.stringify({ compilerOptions: { strict: true } }),
+    );
+    writeFileSync(join(root, "good.ts"), "const a: number = 1;\nexport default a;\n");
+
+    process.chdir(root);
+    try {
+      tmpPath = createAndSetupTsConfig(["good.ts"], ".");
+    } finally {
+      process.chdir(prevCwd);
+    }
+
+    // tmp 配置创建在解析出的 tsconfig（目录内的）旁边
+    const config = JSON.parse(readFileSync(tmpPath, "utf8"));
+    assert.ok(config.files.some((f: string) => f.endsWith("good.ts")));
+    assert.equal(dirname(tmpPath), root);
+  } finally {
+    process.chdir(prevCwd);
+    if (tmpPath) rmSync(tmpPath, { force: true });
+    rmSync(root, { recursive: true, force: true });
+  }
+});
