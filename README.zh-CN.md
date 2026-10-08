@@ -92,6 +92,25 @@ vue-tsc-files --unstaged --errors-in-changed-only
 
 命令行显式传入的文件、`--changed`、`--staged`、`--unstaged` 可以混用，结果取并集。显式传入的文件路径相对于当前工作目录解析（也支持绝对路径）；git 收集出的路径会被转成相对于工作目录的路径。在仓库的子目录下运行时，只收集该子目录下的变更。
 
+## Agent skill
+
+本仓库自带一份 [Kimi Code](https://www.kimi.com/code/docs/en/) 兼容的 agent skill：[`.agents/skills/vue-tsc-files/SKILL.md`](./.agents/skills/vue-tsc-files/SKILL.md)。它教 AI 编码助手（Kimi Code 以及一切识别 `.agents/skills/` 约定的工具）在合适的时机用 `vue-tsc-files` 代替容易误报的裸 `vue-tsc <files>` 调用。
+
+skill 也随 npm 包一起分发——项目里已装 `@whiter001/vue-tsc-files` 时，直接从 `node_modules` 拷到该项目的 `.agents/skills/`（项目级）或 `~/.agents/skills/`（用户级）：
+
+```sh
+mkdir -p .agents/skills
+cp -r node_modules/@whiter001/vue-tsc-files/.agents/skills/vue-tsc-files .agents/skills/
+```
+
+不想装包也可以直接从 GitHub 拉取：
+
+```sh
+mkdir -p .agents/skills/vue-tsc-files
+curl -fsSL -o .agents/skills/vue-tsc-files/SKILL.md \
+  https://raw.githubusercontent.com/whiter001/vue-tsc-files/master/.agents/skills/vue-tsc-files/SKILL.md
+```
+
 ## 备注
 
 默认会向底层 `vue-tsc` 始终传入 `--noEmit`。

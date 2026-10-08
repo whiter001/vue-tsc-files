@@ -21,6 +21,7 @@
   },
   "files": [
     "vue-tsc-files",
+    ".agents/skills/vue-tsc-files",
     "README.md",
     "README.zh-CN.md",
     "LICENSE"

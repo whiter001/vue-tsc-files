@@ -90,6 +90,25 @@ vue-tsc-files --unstaged --errors-in-changed-only
 
 Explicitly passed files, `--changed`, `--staged` and `--unstaged` can be mixed (the union is checked). Note that `--changed` already includes staged changes, so combining it with `--staged` is redundant; `--changed --unstaged` is redundant for the same reason. Explicit file paths are resolved against the current working directory (absolute paths also work); git-collected paths are made relative to the working directory. When run from a repository subdirectory, only changes under that directory are collected.
 
+## Agent skill
+
+This repository ships a ready-made [Kimi Code](https://www.kimi.com/code/docs/en/) agent skill at [`.agents/skills/vue-tsc-files/SKILL.md`](./.agents/skills/vue-tsc-files/SKILL.md). It teaches AI coding agents (Kimi Code and anything else that reads the `.agents/skills/` convention) when and how to use `vue-tsc-files` instead of the error-prone bare `vue-tsc <files>` invocation.
+
+The skill is also distributed inside the npm package — with `@whiter001/vue-tsc-files` already installed in a project, copy it from `node_modules` into that project's `.agents/skills/` (project scope) or into `~/.agents/skills/` (user scope):
+
+```sh
+mkdir -p .agents/skills
+cp -r node_modules/@whiter001/vue-tsc-files/.agents/skills/vue-tsc-files .agents/skills/
+```
+
+Or fetch it straight from GitHub, without installing the package:
+
+```sh
+mkdir -p .agents/skills/vue-tsc-files
+curl -fsSL -o .agents/skills/vue-tsc-files/SKILL.md \
+  https://raw.githubusercontent.com/whiter001/vue-tsc-files/master/.agents/skills/vue-tsc-files/SKILL.md
+```
+
 ## Sidenotes
 
 Flag "--noEmit" is always passed to underlying `vue-tsc` by default.
