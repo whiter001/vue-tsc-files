@@ -2,8 +2,37 @@ import { writeFileSync, unlinkSync, existsSync, statSync } from "fs";
 import { dirname, join, resolve, relative } from "path";
 import { randomBytes } from "crypto";
 import { spawnSync } from "child_process";
-import ts from "typescript";
+import { createRequire } from "module";
+import { pathToFileURL } from "url";
+import type tsTypes from "typescript";
 import { type TSConfig } from "@json-types/tsconfig";
+
+/**
+ * Creates require functions anchored at process.cwd() first and at this
+ * bundle second. dlx/npx 场景下 bundle 位于临时沙箱，从自身位置解析拿到的
+ * 是沙箱自动安装的 peer 副本，版本可能与项目不符；优先 cwd 才能命中项目
+ * 自己安装的版本。正常 devDependency 场景两个锚点解析结果相同。
+ */
+export function createResolverRequires(): NodeRequire[] {
+  return [
+    createRequire(pathToFileURL(join(process.cwd(), "vue-tsc-files.js"))),
+    createRequire(import.meta.url),
+  ];
+}
+
+function loadTypescript(): typeof tsTypes {
+  for (const req of createResolverRequires()) {
+    try {
+      return req("typescript") as typeof tsTypes;
+    } catch {
+      // 尝试下一个锚点
+    }
+  }
+  console.error("Cannot find typescript. Please install it first, e.g. `npm i -D typescript`.");
+  process.exit(1);
+}
+
+const ts = loadTypescript();
 
 /** 只让指定文件自身的 error 影响退出码的开关（--changed-only 为别名） */
 const ERRORS_IN_CHANGED_ONLY_FLAGS = new Set(["--errors-in-changed-only", "--changed-only"]);
@@ -51,7 +80,10 @@ File arguments and the collection flags can be mixed; the union is checked.
 /**
  * Sets up the arguments for vue-tsc.
  *
- * @returns An object containing the files, project value, and remaining arguments to forward.
+ * @returns An object containing the files to check, the files used for
+ *   --errors-in-changed-only attribution (specifiedFiles), the parsed flags
+ *   (errorsInChangedOnly/changed/staged/unstaged), the -p/--project value,
+ *   and the remaining arguments to forward to vue-tsc.
  */
 export function setupArgs() {
   const args = process.argv.slice(2);
@@ -158,9 +190,9 @@ export function setupArgs() {
   };
 }
 /**
- * Generates a random string of characters.
+ * Generates a random 16-char lowercase hex suffix for temporary tsconfig names.
  *
- * @returns {string} The random string of characters.
+ * @returns The random suffix.
  */
 export function randomChars() {
   return randomBytes(8).toString("hex");
@@ -176,7 +208,8 @@ export function randomChars() {
  * @returns The parsed project config (file set + resolved compilerOptions),
  *   or undefined when the config cannot be parsed.
  */
-function getParsedProjectConfig(tsconfigPath: string): ts.ParsedCommandLine | undefined {
+// `ts` 是运行时加载的值绑定，不能用于限定类型名；类型位置走类型专用导入
+function getParsedProjectConfig(tsconfigPath: string): tsTypes.ParsedCommandLine | undefined {
   return ts.getParsedCommandLineOfConfigFile(tsconfigPath, undefined, {
     ...ts.sys,
     // 配置文件此前已成功读取，这里不会再触发不可恢复诊断
@@ -299,7 +332,7 @@ function toCheckableFiles(repoRoot: string, gitPaths: string[]): string[] {
 }
 
 /**
- * Collects changed .ts/.tsx/.vue files from the git working tree, equivalent
+ * Collects changed .vue/.ts/.tsx/.mts/.cts files from the git working tree, equivalent
  * to `git status` semantics: modified, added, renamed, copied, unmerged and
  * untracked files. git status 的 XY 两列同时覆盖已暂存（index）和未暂存
  * （worktree）变更。`-uall` 让 git 直接展开未跟踪目录里的每个文件，
@@ -318,7 +351,7 @@ export function getChangedFiles(): string[] {
 }
 
 /**
- * Collects only staged .ts/.tsx/.vue files (the git index), i.e. exactly what
+ * Collects only staged .vue/.ts/.tsx/.mts/.cts files (the git index), i.e. exactly what
  * the next commit would contain — the pre-commit hook semantic. `--name-only`
  * 对重命名只输出新路径；--diff-filter=ACMRT 排除已删除（D）和未合并（U）。
  *
@@ -334,7 +367,7 @@ export function getStagedFiles(): string[] {
 }
 
 /**
- * Collects only unstaged .ts/.tsx/.vue files: tracked files whose worktree
+ * Collects only unstaged .vue/.ts/.tsx/.mts/.cts files: tracked files whose worktree
  * content differs from the git index (`git diff` semantic). 未跟踪文件不属于
  * git 的 "unstaged" 概念，不在此收集（需要时请用 --changed）。
  *
@@ -543,8 +576,9 @@ export interface ErrorFilterResult {
  * with --errors-in-changed-only they must not affect the exit code.
  *
  * @param output - The combined stdout/stderr of the vue-tsc run.
- * @param specifiedFiles - The files explicitly passed on the command line
- *   (auto-collected d.ts files are excluded, matching the shell wrapper's semantics).
+ * @param specifiedFiles - The files the user asked to check (explicitly
+ *   passed or collected via --changed/--staged/--unstaged). 自动收集的
+ *   d.ts 不参与错误归属。
  * @returns The matched error lines, split by kind.
  */
 export function filterErrorsInFiles(output: string, specifiedFiles: string[]): ErrorFilterResult {

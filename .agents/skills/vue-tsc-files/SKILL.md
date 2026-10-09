@@ -1,7 +1,7 @@
 ---
 name: vue-tsc-files
-description: 用 vue-tsc 对指定的 .vue/.ts/.tsx 文件做类型检查，且不忽略 tsconfig.json 的 include/exclude。当用户要求"只类型检查这几个文件"、检查暂存/改动文件、配置 lint-staged，或直接跑 `vue-tsc <files>` 会绕过 tsconfig 导致误报时使用。也匹配 vue-tsc-files / tsc-files 关键词。
-whenToUse: 用户要求对指定文件、暂存或改动的 .vue/.ts/.tsx 文件运行 vue-tsc 类型检查时
+description: 用 vue-tsc 对指定的 .vue/.ts/.tsx/.mts/.cts 文件做类型检查，且不忽略 tsconfig.json 的 include/exclude。当用户要求"只类型检查这几个文件"、检查暂存/改动文件、配置 lint-staged，或直接跑 `vue-tsc <files>` 会绕过 tsconfig 导致误报时使用。也匹配 vue-tsc-files / tsc-files 关键词。
+whenToUse: 用户要求对指定文件、暂存或改动的 .vue/.ts/.tsx/.mts/.cts 文件运行 vue-tsc 类型检查时
 ---
 
 # vue-tsc-files
@@ -22,7 +22,7 @@ npx vue-tsc-files src/App.vue src/components/Foo.vue
 pnpm exec vue-tsc-files src/App.vue
 ```
 
-未安装时免安装直跑（仍要求目标项目里有 vue-tsc >= 2 与 typescript >= 5）：
+未安装为 devDependency 时也可免安装直跑（项目里装了 vue-tsc/typescript 时优先用项目版本；未装则由 dlx 自动安装 peer 副本，版本可能与项目预期不同）：
 
 ```bash
 pnpm dlx @whiter001/vue-tsc-files src/App.vue
@@ -32,7 +32,7 @@ pnpm dlx @whiter001/vue-tsc-files src/App.vue
 
 | 参数                       | 说明                                                                                                                 |
 | -------------------------- | -------------------------------------------------------------------------------------------------------------------- |
-| `<files...>`               | 要检查的 .vue/.ts/.tsx 文件，相对 cwd 解析，绝对路径也可以                                                           |
+| `<files...>`               | 要检查的 .vue/.ts/.tsx/.mts/.cts 文件，相对 cwd 解析，绝对路径也可以                                                 |
 | `-p` / `--project <path>`  | 指定 tsconfig（monorepo 里常用 `tsconfig.app.json`）；可传目录，等价 `tsc -p .`                                      |
 | `--errors-in-changed-only` | 别名 `--changed-only`：完整打印输出，但只有指定文件自身（和全局配置）的 error 影响退出码，传递依赖里的历史报错不阻断 |
 | `--changed`                | 从 git 收集改动文件（含 staged + unstaged + untracked），可省略命令行文件列表                                        |

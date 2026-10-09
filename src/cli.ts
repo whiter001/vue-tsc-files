@@ -1,11 +1,13 @@
 #! /usr/bin/env node
 import { spawnSync } from "child_process";
 import { dirname, join } from "path";
-import { createRequire } from "module";
-import { setupArgs, createAndSetupTsConfig, filterErrorsInFiles, stripAnsiCodes } from "./util.ts";
-
-// ESM 下没有全局 require，用 createRequire 保持原有的包定位能力
-const require = createRequire(import.meta.url);
+import {
+  setupArgs,
+  createAndSetupTsConfig,
+  createResolverRequires,
+  filterErrorsInFiles,
+  stripAnsiCodes,
+} from "./util.ts";
 
 const { files, specifiedFiles, errorsInChangedOnly, remainingArgsToForward, projectValue } =
   setupArgs();
@@ -15,24 +17,33 @@ const tmpTsconfigPath = createAndSetupTsConfig(files, projectValue);
 /**
  * Resolves the JS entry of the installed vue-tsc package.
  *
- * The previous implementation derived `../.bin/vue-tsc` from the
- * resolved typescript package path, which breaks under pnpm because
- * packages are symlinks into the virtual store and the `.bin` folder
- * does not exist next to the real location. Resolving the vue-tsc
- * package itself and invoking its JS entry with the current node
- * binary works with npm and pnpm on every platform.
+ * 优先从 cwd 解析：dlx/npx 场景下 bundle 在临时沙箱里，从自身位置解析
+ * 拿到的是沙箱自动安装的 peer 副本，版本可能与项目不符。定位 package.json
+ * 再拼 bin 路径，而不是推导 ../.bin/vue-tsc：pnpm 的符号链接布局下真实
+ * 包旁边没有 .bin。
  *
  * @returns The absolute path of vue-tsc's cli entry file.
  */
 function resolveVueTscEntry(): string {
-  try {
-    const packageJsonPath = require.resolve("vue-tsc/package.json");
-    return join(dirname(packageJsonPath), "bin", "vue-tsc.js");
-  } catch {
-    // vue-tsc 未来版本若添加 exports 且未导出 ./package.json，
-    // 回退到直接解析 bin 入口子路径
-    return require.resolve("vue-tsc/bin/vue-tsc.js");
+  const requires = createResolverRequires();
+  for (const req of requires) {
+    try {
+      const packageJsonPath = req.resolve("vue-tsc/package.json");
+      return join(dirname(packageJsonPath), "bin", "vue-tsc.js");
+    } catch {
+      // 尝试下一个锚点
+    }
   }
+  for (const req of requires) {
+    try {
+      // vue-tsc 未来版本若添加 exports 且未导出 ./package.json，
+      // 回退到直接解析 bin 入口子路径
+      return req.resolve("vue-tsc/bin/vue-tsc.js");
+    } catch {
+      // 尝试下一个锚点
+    }
+  }
+  throw new Error("vue-tsc not found");
 }
 
 let vueTscEntry: string;

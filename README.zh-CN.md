@@ -33,7 +33,7 @@ pnpm add -D vue-tsc typescript
 ```json
 {
   "lint-staged": {
-    "**/*.{vue,ts,tsx}": "vue-tsc-files"
+    "**/*.{vue,ts,tsx,mts,cts}": "vue-tsc-files"
   }
 }
 ```
@@ -70,7 +70,7 @@ vue-tsc-files -p . src/App.vue
 
 ## 脱离 lint-staged 直接检查变更文件
 
-传入 `--changed` 可以让工具从 git 工作区自动收集文件列表，代替命令行传入。它遵循 `git status` 的语义：已修改、已新增、已重命名、已复制、未合并和未跟踪的 `.ts`/`.tsx`/`.vue` 文件都会被检查；已删除的文件被跳过。同时包含已暂存（index）和未暂存（worktree）两类变更。可以与 `--errors-in-changed-only` 组合：
+传入 `--changed` 可以让工具从 git 工作区自动收集文件列表，代替命令行传入。它遵循 `git status` 的语义：已修改、已新增、已重命名、已复制、未合并和未跟踪的 `.vue`/`.ts`/`.tsx`/`.mts`/`.cts` 文件都会被检查；已删除的文件被跳过。同时包含已暂存（index）和未暂存（worktree）两类变更。可以与 `--errors-in-changed-only` 组合：
 
 ```sh
 vue-tsc-files --changed --errors-in-changed-only

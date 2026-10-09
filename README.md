@@ -33,7 +33,7 @@ With lint-staged:
 ```json
 {
   "lint-staged": {
-    "**/*.{vue,ts,tsx}": "vue-tsc-files"
+    "**/*.{vue,ts,tsx,mts,cts}": "vue-tsc-files"
   }
 }
 ```
@@ -70,7 +70,7 @@ The temporary tsconfig is created next to the one you specify, so relative `exte
 
 ## Type-check changed files without lint-staged
 
-Pass `--changed` to collect the file list from git instead of the command line. It uses `git status` semantics — modified, added, renamed, copied, unmerged and untracked `.ts`/`.tsx`/`.vue` files in the working tree are checked; deleted files are skipped. Both staged (index) and unstaged (worktree) changes are included. It can be combined with `--errors-in-changed-only`:
+Pass `--changed` to collect the file list from git instead of the command line. It uses `git status` semantics — modified, added, renamed, copied, unmerged and untracked `.vue`/`.ts`/`.tsx`/`.mts`/`.cts` files in the working tree are checked; deleted files are skipped. Both staged (index) and unstaged (worktree) changes are included. It can be combined with `--errors-in-changed-only`:
 
 ```sh
 vue-tsc-files --changed --errors-in-changed-only

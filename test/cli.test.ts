@@ -476,6 +476,25 @@ test("--unstaged 无未暂存文件时提示并以 0 退出", () => {
   }
 });
 
+test("优先使用 cwd 项目里的 vue-tsc 而非 bundle 旁的副本", () => {
+  const root = createFixture({
+    "good.ts": "const a: number = 1;\nexport default a;\n",
+    "node_modules/vue-tsc/package.json": JSON.stringify({
+      name: "vue-tsc",
+      version: "0.0.0-stub",
+      bin: { "vue-tsc": "./bin/vue-tsc.js" },
+    }),
+    "node_modules/vue-tsc/bin/vue-tsc.js": 'console.log("STUB_VUE_TSC_INVOKED");\n',
+  });
+  try {
+    const result = runCli(root, ["good.ts"]);
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stdout, /STUB_VUE_TSC_INVOKED/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 function readdirSyncTmpConfigs(root: string) {
   return readdirSync(root).filter((f: string) => /^tsconfig\..+\.json$/.test(f));
 }
