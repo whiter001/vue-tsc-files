@@ -17,7 +17,7 @@ pnpm test       # builds first (pretest), then node:test unit + integration test
 
 - Runtime: Node >= 20.19; development: Node >= 22.18 (tests use Node's built-in type stripping).
 - Source lives in `src/` (only `cli.ts` + `util.ts`); the root `vue-tsc-files` file is the gitignored build output — never edit it directly.
-- Release: `node scripts/release.mjs [patch|minor|major|x.y.z] [--commit]`.
+- Release: `node scripts/release.mjs [patch|minor|major|x.y.z] [--commit] [--dry-run] [--yes]`. Unknown flags abort; a real publish asks for confirmation unless `--yes`.
 
 ## Issue reporting convention (mandatory)
 
