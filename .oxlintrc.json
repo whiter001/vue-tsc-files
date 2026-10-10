@@ -8,6 +8,5 @@
     "no-eval": "error",
     "typescript/no-explicit-any": "warn",
     "typescript/no-unused-vars": "error"
-  },
-  "ignorePatterns": ["bin", "node_modules"]
+  }
 }

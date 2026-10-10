@@ -16,7 +16,7 @@ import {
 /** 在替换 process.argv 的上下文中调用 setupArgs */
 function withArgv(args: string[], fn: () => void) {
   const original = process.argv;
-  process.argv = [original[0], original[1], ...args];
+  process.argv = [original[0]!, original[1]!, ...args];
   try {
     fn();
   } finally {
@@ -114,7 +114,7 @@ test("filterErrorsInFiles 只保留指定文件的错误，忽略传递依赖的
 
   const { errorsInSpecifiedFiles, globalErrors } = filterErrorsInFiles(output, ["src/changed.ts"]);
   assert.equal(errorsInSpecifiedFiles.length, 1);
-  assert.match(errorsInSpecifiedFiles[0], /src\/changed\.ts/);
+  assert.match(errorsInSpecifiedFiles[0]!, /src\/changed\.ts/);
   assert.deepEqual(globalErrors, []);
 });
 
@@ -151,7 +151,7 @@ test("filterErrorsInFiles 支持 --pretty 格式（path:line:col - error）", ()
 
   const { errorsInSpecifiedFiles, globalErrors } = filterErrorsInFiles(output, ["src/changed.ts"]);
   assert.equal(errorsInSpecifiedFiles.length, 1);
-  assert.match(errorsInSpecifiedFiles[0], /src\/changed\.ts/);
+  assert.match(errorsInSpecifiedFiles[0]!, /src\/changed\.ts/);
   assert.deepEqual(globalErrors, []);
 });
 
@@ -165,7 +165,7 @@ test("filterErrorsInFiles 去除 ANSI 色码后再归属（--pretty 彩色输出
 
   const { errorsInSpecifiedFiles } = filterErrorsInFiles(output, ["src/changed.ts"]);
   assert.equal(errorsInSpecifiedFiles.length, 1);
-  assert.match(stripAnsiCodes(errorsInSpecifiedFiles[0]), /src\/changed\.ts/);
+  assert.match(stripAnsiCodes(errorsInSpecifiedFiles[0]!), /src\/changed\.ts/);
 });
 
 test("stripAnsiCodes 去除 SGR 序列，保留文本内容", () => {

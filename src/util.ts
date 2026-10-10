@@ -5,7 +5,7 @@ import { spawnSync } from "child_process";
 import { createRequire } from "module";
 import { pathToFileURL } from "url";
 import type tsTypes from "typescript";
-import { type TSConfig } from "@json-types/tsconfig";
+import type { TSConfig } from "@json-types/tsconfig";
 
 /**
  * Creates require functions anchored at process.cwd() first and at this
@@ -100,7 +100,7 @@ export function setupArgs() {
   let projectValue: string | undefined;
   const remainingArgsToForward: string[] = [];
   for (let i = 0; i < args.length; i++) {
-    const arg = args[i];
+    const arg = args[i]!;
     if (HELP_FLAGS.has(arg)) {
       // 在任何文件收集和 tsconfig 读取之前生效，保证无 tsconfig 的目录里也能用
       console.log(HELP_TEXT);
@@ -255,8 +255,9 @@ export function parseGitStatusPorcelain(output: string): string[] {
   const tokens = output.split("\0").filter((token) => token.length > 0);
   const paths: string[] = [];
   for (let i = 0; i < tokens.length; i++) {
-    const status = tokens[i].slice(0, 2);
-    const path = tokens[i].slice(3);
+    const token = tokens[i]!;
+    const status = token.slice(0, 2);
+    const path = token.slice(3);
     if (/[RC]/.test(status)) {
       if (/[MARCU?]/.test(status)) {
         paths.push(path);
@@ -590,7 +591,7 @@ export function filterErrorsInFiles(output: string, specifiedFiles: string[]): E
     const trimmed = stripAnsiCodes(line).trim();
     const located = LOCATED_ERROR_RE.exec(trimmed) ?? PRETTY_LOCATED_ERROR_RE.exec(trimmed);
     if (located) {
-      if (targets.has(normalizeDiagnosticPath(located[1]))) {
+      if (targets.has(normalizeDiagnosticPath(located[1]!))) {
         errorsInSpecifiedFiles.push(line);
       }
       continue;
