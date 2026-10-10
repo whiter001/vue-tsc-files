@@ -4,6 +4,8 @@
 // Usage: see RELEASE_USAGE (also printed by --help).
 //
 // Notes:
+// - Requires Node >= 22.18: the .ts helper below relies on native type
+//   stripping; a startup guard turns old-Node load errors into a clear message.
 // - Unknown flags or targets abort with usage instead of silently falling back
 //   to a default patch release (issue #16: `--help` used to start a publish).
 // - A confirmation prompt guards the real publish; --yes skips it.
@@ -23,7 +25,17 @@ import { createInterface } from "node:readline/promises";
 import { readFileSync, writeFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
-import { RELEASE_USAGE, bumpVersion, parseReleaseArgs } from "./release-args.ts";
+
+// 静态 import .ts 在旧版 Node 会在模块加载阶段直接抛 ERR_UNKNOWN_FILE_EXTENSION，
+// 轮不到脚本自己的报错逻辑，所以先查版本再动态 import。
+const [nodeMaj, nodeMin] = process.version.slice(1).split(".").map(Number);
+if (!(nodeMaj > 22 || (nodeMaj === 22 && nodeMin >= 18))) {
+  console.error(
+    `error: release.mjs imports a .ts module and needs Node >= 22.18 (found ${process.version}).`,
+  );
+  process.exit(1);
+}
+const { RELEASE_USAGE, bumpVersion, parseReleaseArgs } = await import("./release-args.ts");
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const PKG_PATH = join(ROOT, "package.json");
@@ -97,7 +109,6 @@ console.log(`\n@whiter001/vue-tsc-files: ${oldVersion} -> ${newVersion}`);
 if (!willBump) {
   console.log("(version unchanged, skipping bump)");
 }
-console.log(`npm user: ${npmWhoAmI(pkg.publishConfig?.registry)}\n`);
 
 if (dryRun) {
   const steps = [];
@@ -111,6 +122,9 @@ if (dryRun) {
   console.log(`dry-run: would ${steps.join(", then would ")}. No changes made.`);
   process.exit(0);
 }
+
+// dry-run 已在 whoami 之前结束：预览计划不依赖网络与 npm 登录态
+console.log(`npm user: ${npmWhoAmI(pkg.publishConfig?.registry)}\n`);
 
 if (!assumeYes && !(await confirmPublish(newVersion))) {
   console.log("Aborted. Nothing published, package.json untouched.");

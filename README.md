@@ -132,7 +132,7 @@ declare module "@vue/runtime-core" {
 
 ## Development
 
-Runtime requirement is Node >= 20.19 (the `engines` field, applies to the published CLI). Development requires Node >= 22.18 because the tests run TypeScript sources via Node's built-in type stripping — the stricter version does not apply to end users.
+Runtime requirement is Node >= 20.19 (the `engines` field, applies to the published CLI). Development requires Node >= 22.18 because the tests and the release script run TypeScript sources via Node's built-in type stripping — the stricter version does not apply to end users.
 
 ```sh
 pnpm install

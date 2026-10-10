@@ -27,7 +27,9 @@ export type ParsedReleaseArgs =
   | { kind: "plan"; plan: ReleasePlan }
   | { kind: "error"; message: string };
 
-const VERSION_RE = /^\d+\.\d+\.\d+$/;
+// semver 规范禁止前导零；01.02.3 这类版本 npm publish 会直接拒收，
+// 与其白走一轮发布-失败-回滚，不如在解析阶段就拦下
+const VERSION_RE = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/;
 const SEMANTIC_TARGETS = new Set(["major", "minor", "patch"]);
 
 export function parseReleaseArgs(argv: string[]): ParsedReleaseArgs {
