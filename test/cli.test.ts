@@ -495,6 +495,101 @@ test("优先使用 cwd 项目里的 vue-tsc 而非 bundle 旁的副本", () => {
   }
 });
 
+function stubVueTsc(script: string) {
+  return {
+    "node_modules/vue-tsc/package.json": JSON.stringify({
+      name: "vue-tsc",
+      version: "0.0.0-stub",
+      bin: { "vue-tsc": "./bin/vue-tsc.js" },
+    }),
+    "node_modules/vue-tsc/bin/vue-tsc.js": script,
+  };
+}
+
+// 从实际 CLI 生成的临时配置输出文件顺序，不依赖 TS 诊断的排序规则。
+const PRINT_CONFIG_FILES = `
+const { readFileSync } = require("fs");
+const { relative } = require("path");
+const config = JSON.parse(readFileSync(process.argv[process.argv.indexOf("-p") + 1], "utf8"));
+console.log(JSON.stringify(config.files.map(file => relative(process.cwd(), file))));
+`;
+
+test("显式文件与 --changed 取并集，显式优先且重复项不改变顺序", () => {
+  const root = createGitFixture({
+    "z-explicit.ts": "export default 1;\n",
+    "b-shared.ts": "export default 1;\n",
+    ...stubVueTsc(PRINT_CONFIG_FILES),
+  });
+  try {
+    writeFileSync(join(root, "b-shared.ts"), "export default 2;\n");
+    writeFileSync(join(root, "a-new.ts"), "export default 3;\n");
+    for (const flags of [["--changed"], ["--unstaged", "--staged", "--changed"]]) {
+      const result = runCli(root, ["z-explicit.ts", ...flags, "b-shared.ts", "z-explicit.ts"]);
+      assert.equal(result.status, 0, result.stderr);
+      assert.deepEqual(JSON.parse(result.stdout), ["z-explicit.ts", "b-shared.ts", "a-new.ts"]);
+    }
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("--staged --unstaged 按收集器顺序合并去重，不含未跟踪文件", () => {
+  const root = createGitFixture({
+    "a-unstaged.ts": "export default 1;\n",
+    "b-shared.ts": "export default 1;\n",
+    "z-staged.ts": "export default 1;\n",
+    ...stubVueTsc(PRINT_CONFIG_FILES),
+  });
+  try {
+    writeFileSync(join(root, "b-shared.ts"), "export default 2;\n");
+    writeFileSync(join(root, "z-staged.ts"), "export default 2;\n");
+    git(root, ["add", "b-shared.ts", "z-staged.ts"]);
+    writeFileSync(join(root, "b-shared.ts"), "export default 3;\n");
+    writeFileSync(join(root, "a-unstaged.ts"), "export default 2;\n");
+    writeFileSync(join(root, "untracked.ts"), "export default 1;\n");
+    for (const flags of [
+      ["--staged", "--unstaged"],
+      ["--unstaged", "--staged"],
+    ]) {
+      const result = runCli(root, flags);
+      assert.equal(result.status, 0, result.stderr);
+      assert.deepEqual(JSON.parse(result.stdout), ["b-shared.ts", "z-staged.ts", "a-unstaged.ts"]);
+    }
+    const all = runCli(root, ["--unstaged", "--staged", "--changed"]);
+    assert.equal(all.status, 0, all.stderr);
+    assert.deepEqual(JSON.parse(all.stdout), [
+      "a-unstaged.ts",
+      "b-shared.ts",
+      "z-staged.ts",
+      "untracked.ts",
+    ]);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+for (const [name, diagnostic, status] of [
+  ["全局诊断", "error TS5083: Cannot read file 'missing.json'.", 2],
+  ["无诊断崩溃", "Error: vue-tsc crashed", 7],
+] as const) {
+  test(`--errors-in-changed-only 保留 stub ${name}的输出及非零退出码`, () => {
+    const root = createFixture({
+      "good.ts": "export default 1;\n",
+      ...stubVueTsc(
+        `console.log("STUB_STDOUT"); console.error(${JSON.stringify(diagnostic)}); process.exitCode = ${status};`,
+      ),
+    });
+    try {
+      const result = runCli(root, ["--errors-in-changed-only", "good.ts"]);
+      assert.equal(result.status, status);
+      assert.equal(result.stdout, "STUB_STDOUT\n");
+      assert.equal(result.stderr, `${diagnostic}\n`);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+}
+
 function readdirSyncTmpConfigs(root: string) {
   return readdirSync(root).filter((f: string) => /^tsconfig\..+\.json$/.test(f));
 }

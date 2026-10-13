@@ -77,14 +77,6 @@ File arguments and the collection flags can be mixed; the union is checked.
 --noEmit is always passed to vue-tsc; any other flags are forwarded as-is.
 `;
 
-/**
- * Sets up the arguments for vue-tsc.
- *
- * @returns An object containing the files to check, the files used for
- *   --errors-in-changed-only attribution (specifiedFiles), the parsed flags
- *   (errorsInChangedOnly/changed/staged/unstaged), the -p/--project value,
- *   and the remaining arguments to forward to vue-tsc.
- */
 export function setupArgs() {
   const args = process.argv.slice(2);
 
@@ -146,8 +138,7 @@ export function setupArgs() {
     remainingArgsToForward.push(arg);
   }
 
-  const specifiedFiles = [...new Set(explicitFiles)];
-  const seen = new Set(specifiedFiles);
+  const seen = new Set(explicitFiles);
   const collectors = [
     [changed, getChangedFiles],
     [staged, getStagedFiles],
@@ -156,12 +147,10 @@ export function setupArgs() {
   for (const [enabled, collect] of collectors) {
     if (!enabled) continue;
     for (const file of collect()) {
-      if (!seen.has(file)) {
-        seen.add(file);
-        specifiedFiles.push(file);
-      }
+      seen.add(file);
     }
   }
+  const specifiedFiles = [...seen];
 
   if (specifiedFiles.length === 0) {
     if (changed || staged || unstaged) {
@@ -189,25 +178,12 @@ export function setupArgs() {
     remainingArgsToForward,
   };
 }
-/**
- * Generates a random 16-char lowercase hex suffix for temporary tsconfig names.
- *
- * @returns The random suffix.
- */
+/** 临时 tsconfig 使用 16 位小写十六进制随机后缀。 */
 export function randomChars() {
   return randomBytes(8).toString("hex");
 }
 
-/**
- * Parses the project config using the TypeScript parser, with extends chains
- * resolved. Used both to collect .d.ts files within the tsconfig's own
- * include/exclude/files scope (so declarations the project itself would never
- * compile are not pulled in) and to inspect resolved compilerOptions.
- *
- * @param tsconfigPath - The absolute path of the root tsconfig.json.
- * @returns The parsed project config (file set + resolved compilerOptions),
- *   or undefined when the config cannot be parsed.
- */
+/** 沿 extends 解析选项，并仅收集项目 include/exclude/files 范围内的 .d.ts。 */
 // `ts` 是运行时加载的值绑定，不能用于限定类型名；类型位置走类型专用导入
 function getParsedProjectConfig(tsconfigPath: string): tsTypes.ParsedCommandLine | undefined {
   return ts.getParsedCommandLineOfConfigFile(tsconfigPath, undefined, {
@@ -217,12 +193,7 @@ function getParsedProjectConfig(tsconfigPath: string): tsTypes.ParsedCommandLine
   });
 }
 
-/**
- * Returns whether the argument is a file with a supported extension.
- * Case-insensitive: Windows/macOS 文件系统不区分大小写，git 可能报告
- * Foo.TS / Bar.Vue 这样的路径，漏检会让 CI 假绿。
- * @param arg - The argument to check.
- */
+/** 扩展名忽略大小写，避免漏掉 git 报告的 Foo.TS / Bar.Vue 等路径。 */
 export function isTscFile(arg: string) {
   const lower = arg.toLowerCase();
   return (
@@ -234,22 +205,13 @@ export function isTscFile(arg: string) {
   );
 }
 
-/**
- * Filters the given array of arguments and returns an array of files with specific extensions.
- * @param args - The array of arguments to filter.
- * @returns An array of files with extensions ".vue", ".ts", ".tsx", ".mts" or ".cts".
- */
 export function getTscFiles(args: string[]) {
   return args.filter(isTscFile);
 }
 
 /**
- * Parses `git status --porcelain=v1 -z` output into changed file paths.
- * -z 格式下每个条目为 "XY path\0"；重命名/复制条目（XY 含 R/C）紧随其后
- * 还有一个旧路径条目，跳过它只保留新路径。已删除的文件（D）不参与检查。
- *
- * @param output - The raw stdout of git status.
- * @returns Changed file paths relative to the repository root.
+ * 解析 git status --porcelain=v1 -z，路径相对仓库根目录。
+ * 条目为 "XY path\0"；R/C 后的旧路径需跳过，纯删除状态不参与检查。
  */
 export function parseGitStatusPorcelain(output: string): string[] {
   const tokens = output.split("\0").filter((token) => token.length > 0);
@@ -258,16 +220,12 @@ export function parseGitStatusPorcelain(output: string): string[] {
     const token = tokens[i]!;
     const status = token.slice(0, 2);
     const path = token.slice(3);
-    if (/[RC]/.test(status)) {
-      if (/[MARCU?]/.test(status)) {
-        paths.push(path);
-      }
-      // 重命名/复制的第二个条目是旧路径，已删除不再检查
-      i++;
-      continue;
-    }
     if (/[MARCU?]/.test(status)) {
       paths.push(path);
+    }
+    if (/[RC]/.test(status)) {
+      // 重命名/复制的第二个条目是旧路径，只检查新路径
+      i++;
     }
   }
   return paths;
@@ -333,14 +291,8 @@ function toCheckableFiles(repoRoot: string, gitPaths: string[]): string[] {
 }
 
 /**
- * Collects changed .vue/.ts/.tsx/.mts/.cts files from the git working tree, equivalent
- * to `git status` semantics: modified, added, renamed, copied, unmerged and
- * untracked files. git status 的 XY 两列同时覆盖已暂存（index）和未暂存
- * （worktree）变更。`-uall` 让 git 直接展开未跟踪目录里的每个文件，
- * 无需自行递归目录。Output paths are made relative to the current working
- * directory so the tool works when run from a repository subdirectory.
- *
- * @returns Changed file paths relative to process.cwd().
+ * status 的 XY 两列覆盖 index/worktree 变更（含未合并），-uall 展开未跟踪目录。
+ * -- . 限定当前目录范围；返回 cwd 相对路径，支持从仓库子目录运行。
  */
 export function getChangedFiles(): string[] {
   const repoRoot = getRepoRoot();
@@ -351,56 +303,35 @@ export function getChangedFiles(): string[] {
   return toCheckableFiles(repoRoot, parseGitStatusPorcelain(statusOutput));
 }
 
-/**
- * Collects only staged .vue/.ts/.tsx/.mts/.cts files (the git index), i.e. exactly what
- * the next commit would contain — the pre-commit hook semantic. `--name-only`
- * 对重命名只输出新路径；--diff-filter=ACMRT 排除已删除（D）和未合并（U）。
- *
- * @returns Staged file paths relative to process.cwd().
- */
+function getDiffFiles(cached: boolean): string[] {
+  const repoRoot = getRepoRoot();
+  // --name-only 只保留重命名的新路径；ACMRT 排除删除和未合并文件。
+  const diffOutput = runGit(
+    [
+      "diff",
+      ...(cached ? ["--cached"] : []),
+      "--name-only",
+      "-z",
+      "--diff-filter=ACMRT",
+      "--",
+      ".",
+    ],
+    cached ? "git diff --cached failed" : "git diff failed",
+  );
+  return toCheckableFiles(repoRoot, diffOutput.split("\0").filter(Boolean));
+}
+
+/** 按 index 选择已暂存文件，但类型检查仍读取当前磁盘内容。 */
 export function getStagedFiles(): string[] {
-  const repoRoot = getRepoRoot();
-  const diffOutput = runGit(
-    ["diff", "--cached", "--name-only", "-z", "--diff-filter=ACMRT", "--", "."],
-    "git diff --cached failed",
-  );
-  return toCheckableFiles(repoRoot, diffOutput.split("\0").filter(Boolean));
+  return getDiffFiles(true);
 }
 
-/**
- * Collects only unstaged .vue/.ts/.tsx/.mts/.cts files: tracked files whose worktree
- * content differs from the git index (`git diff` semantic). 未跟踪文件不属于
- * git 的 "unstaged" 概念，不在此收集（需要时请用 --changed）。
- *
- * @returns Unstaged file paths relative to process.cwd().
- */
+/** worktree 相对 index 的改动，不含未跟踪文件（需用 --changed）。 */
 export function getUnstagedFiles(): string[] {
-  const repoRoot = getRepoRoot();
-  const diffOutput = runGit(
-    ["diff", "--name-only", "-z", "--diff-filter=ACMRT", "--", "."],
-    "git diff failed",
-  );
-  return toCheckableFiles(repoRoot, diffOutput.split("\0").filter(Boolean));
+  return getDiffFiles(false);
 }
 
-/**
- * Resolves a file path relative to the root directory.
- * @param paths - The paths to resolve.
- * @returns The resolved file path.
- */
-export function resolveFromRoot(...paths: string[]) {
-  return join(process.cwd(), ...paths);
-}
-
-/**
- * Retrieves the root tsconfig.json file.
- * Uses the TypeScript compiler's own config reader so comments and trailing
- * commas are supported without eval, and malformed configs produce a proper
- * diagnostic instead of a stack trace.
- *
- * @param tsconfigPath - The resolved path of the tsconfig.json file.
- * @returns The parsed TSConfig object.
- */
+/** 使用 TS 配置读取器支持注释、尾逗号，并为非法配置提供诊断。 */
 function getRootTsConfig(tsconfigPath: string): TSConfig {
   const result = ts.readConfigFile(tsconfigPath, ts.sys.readFile);
 
@@ -413,18 +344,7 @@ function getRootTsConfig(tsconfigPath: string): TSConfig {
   return result.config as TSConfig;
 }
 
-/**
- * Creates a temporary TypeScript configuration file next to the original
- * tsconfig, so relative `extends`, `baseUrl`, `paths`, `typeRoots` etc.
- * resolve against the same directory as the user's config.
- * @param rootTsConfig The root TypeScript configuration.
- * @param files The list of files to include in the temporary configuration.
- * @param configDir The directory the original tsconfig lives in.
- * @param userSkipLibCheck The skipLibCheck value resolved through the full
- *   extends chain; the default `true` is only injected when the user has not
- *   set it anywhere (undefined).
- * @returns The path of the created temporary TypeScript configuration file.
- */
+/** 临时配置与原配置同目录，保持 extends/baseUrl/paths/typeRoots 的相对路径语义。 */
 function createTmpTsConfig(
   rootTsConfig: TSConfig,
   files: string[],
@@ -435,8 +355,7 @@ function createTmpTsConfig(
   const tmpTsconfig = {
     ...rootTsConfig,
     compilerOptions: {
-      // 默认开启 skipLibCheck 加速检查；用户显式配置（true/false）优先，
-      // 包括写在 extends 链上游 base 配置里的情况
+      // 默认开启 skipLibCheck 加速检查；用户显式配置（含 extends 继承值）优先。
       ...(userSkipLibCheck === undefined ? { skipLibCheck: true } : {}),
       ...rootTsConfig.compilerOptions,
     },
@@ -463,11 +382,6 @@ const SIGNAL_EXIT_CODES = {
 const tmpTsconfigPaths = new Set<string>();
 let cleanupHandlersRegistered = false;
 
-/**
- * Registers a cleanup handler to remove a temporary tsconfig file.
- *
- * @param tmpTsconfigPath - The path of the temporary tsconfig file.
- */
 function registerCleanupHandler(tmpTsconfigPath: string) {
   tmpTsconfigPaths.add(tmpTsconfigPath);
   if (cleanupHandlersRegistered) return;
@@ -485,25 +399,18 @@ function registerCleanupHandler(tmpTsconfigPath: string) {
 
   process.on("exit", cleanup);
   for (const signal of ["SIGHUP", "SIGINT", "SIGTERM"] as const) {
-    // 信号事件回调没有参数，显式以 128+信号值 退出；
-    // 之前直接透传 undefined 会以 0 退出，把中断误报为检查通过
+    // 信号回调没有参数，需显式设置退出码，避免把中断误报为通过。
     process.on(signal, () => {
       cleanup();
       process.exit(SIGNAL_EXIT_CODES[signal]);
     });
   }
 }
-/**
- * Creates a temporary TypeScript configuration file and returns its path.
- *
- * @param files - An array of file paths to include in the temporary tsconfig file.
- * @param argsProjectValue - Optional. The value of the --project argument.
- * @returns The path of the temporary tsconfig file.
- */
+
 export function createAndSetupTsConfig(files: string[], argsProjectValue?: string) {
   let tsconfigPath = argsProjectValue
     ? resolve(process.cwd(), argsProjectValue)
-    : resolveFromRoot("tsconfig.json");
+    : resolve(process.cwd(), "tsconfig.json");
   // 对齐 tsc 的 -p 语义：传目录时读取其中的 tsconfig.json；
   // 目录里没有 tsconfig.json 时不特殊处理，让读取失败的报错自然发生
   if (statSync(tsconfigPath, { throwIfNoEntry: false })?.isDirectory()) {
@@ -522,14 +429,12 @@ export function createAndSetupTsConfig(files: string[], argsProjectValue?: strin
     );
   }
 
-  const tmpTsconfigPath = createTmpTsConfig(
+  return createTmpTsConfig(
     rootTsConfig,
     [...files, ...dtsFiles],
     dirname(tsconfigPath),
     parsed?.options.skipLibCheck,
   );
-
-  return tmpTsconfigPath;
 }
 
 /** 带位置信息的诊断行，如 src/a.ts(12,5): error TS2322: ... */
@@ -572,15 +477,8 @@ export interface ErrorFilterResult {
 }
 
 /**
- * Splits vue-tsc output into errors belonging to the specified files and
- * global errors. Errors reported in transitively compiled files are ignored:
- * with --errors-in-changed-only they must not affect the exit code.
- *
- * @param output - The combined stdout/stderr of the vue-tsc run.
- * @param specifiedFiles - The files the user asked to check (explicitly
- *   passed or collected via --changed/--staged/--unstaged). 自动收集的
- *   d.ts 不参与错误归属。
- * @returns The matched error lines, split by kind.
+ * 从合并的 stdout/stderr 收集指定文件和全局错误，忽略传递依赖错误。
+ * specifiedFiles 仅含显式参数和 Git 收集文件；自动补入的 .d.ts 不参与归属。
  */
 export function filterErrorsInFiles(output: string, specifiedFiles: string[]): ErrorFilterResult {
   const targets = new Set(specifiedFiles.map(normalizeDiagnosticPath));
@@ -602,4 +500,23 @@ export function filterErrorsInFiles(output: string, specifiedFiles: string[]): E
   }
 
   return { errorsInSpecifiedFiles, globalErrors };
+}
+
+export function getDiagnosticExitResult(
+  status: number | null,
+  output: string,
+  specifiedFiles: string[],
+): { exitCode: number; ignoredDependencyErrors: boolean } {
+  const exitCode = status ?? 1;
+  if (exitCode === 0) return { exitCode: 0, ignoredDependencyErrors: false };
+
+  const { errorsInSpecifiedFiles, globalErrors } = filterErrorsInFiles(output, specifiedFiles);
+  if (errorsInSpecifiedFiles.length > 0 || globalErrors.length > 0) {
+    return { exitCode, ignoredDependencyErrors: false };
+  }
+  // 非零退出却没有可识别诊断（如 vue-tsc 崩溃），保守按失败处理。
+  if (!/error TS\d+:/.test(stripAnsiCodes(output))) {
+    return { exitCode, ignoredDependencyErrors: false };
+  }
+  return { exitCode: 0, ignoredDependencyErrors: true };
 }

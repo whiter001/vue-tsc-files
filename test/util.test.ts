@@ -9,6 +9,7 @@ import {
   setupArgs,
   createAndSetupTsConfig,
   filterErrorsInFiles,
+  getDiagnosticExitResult,
   stripAnsiCodes,
   parseGitStatusPorcelain,
 } from "../src/util.ts";
@@ -104,6 +105,57 @@ test("setupArgs 未传 flag 时 errorsInChangedOnly 为 false", () => {
     const { errorsInChangedOnly } = setupArgs();
     assert.equal(errorsInChangedOnly, false);
   });
+});
+
+test("setupArgs 显式文件按首次出现顺序去重，files 与 specifiedFiles 独立", () => {
+  withArgv(["src/b.vue", "src/a.ts", "src/b.vue", "src/c.ts", "src/a.ts"], () => {
+    const { files, specifiedFiles } = setupArgs();
+    assert.deepEqual(specifiedFiles, ["src/b.vue", "src/a.ts", "src/c.ts"]);
+    assert.deepEqual(files, specifiedFiles);
+    assert.notEqual(files, specifiedFiles);
+    files.push("env.d.ts");
+    assert.deepEqual(specifiedFiles, ["src/b.vue", "src/a.ts", "src/c.ts"]);
+  });
+});
+
+for (const [name, status, output, exitCode, ignoredDependencyErrors] of [
+  ["status 0 优先于诊断", 0, "src/a.ts(1,1): error TS2322: x", 0, false],
+  ["null 加空输出", null, "", 1, false],
+  ["null 加仅依赖诊断保留现有 exit 0 行为", null, "dep.ts(1,1): error TS2322: x", 0, true],
+  ["目标诊断保留原状态", 2, "src/a.ts(1,1): error TS2322: x", 2, false],
+  ["null 加目标诊断", null, "src/a.ts(1,1): error TS2322: x", 1, false],
+  ["全局诊断保留原状态", 3, "error TS5083: Cannot read file", 3, false],
+  ["null 加全局诊断", null, "error TS5083: Cannot read file", 1, false],
+  ["仅依赖诊断", 2, "dep.ts(1,1): error TS2322: x", 0, true],
+  ["无诊断崩溃", 7, "Error: vue-tsc crashed", 7, false],
+  ["非零加空输出", 2, "", 2, false],
+  ["pretty 目标诊断", 2, "src/a.ts:1:7 - error TS2322: x", 2, false],
+  [
+    "pretty ANSI 目标诊断",
+    2,
+    "\x1b[96msrc/a.ts\x1b[0m:1:7 - \x1b[91merror\x1b[0m TS2322: x",
+    2,
+    false,
+  ],
+  [
+    "pretty ANSI 依赖诊断",
+    2,
+    "\x1b[96mdep.ts\x1b[0m:1:7 - \x1b[91merror\x1b[0m TS2322: x",
+    0,
+    true,
+  ],
+] as const) {
+  test(`getDiagnosticExitResult ${name}`, () => {
+    assert.deepEqual(getDiagnosticExitResult(status, output, ["src/a.ts"]), {
+      exitCode,
+      ignoredDependencyErrors,
+    });
+  });
+}
+
+test("parseGitStatusPorcelain 复制与混合状态只收集一次新路径，并跳过旧路径", () => {
+  const output = ["C  new.ts", "old.ts", "RM renamed.ts", "before.ts", " M next.ts", ""].join("\0");
+  assert.deepEqual(parseGitStatusPorcelain(output), ["new.ts", "renamed.ts", "next.ts"]);
 });
 
 test("filterErrorsInFiles 只保留指定文件的错误，忽略传递依赖的错误", () => {

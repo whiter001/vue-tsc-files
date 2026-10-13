@@ -5,8 +5,7 @@ import {
   setupArgs,
   createAndSetupTsConfig,
   createResolverRequires,
-  filterErrorsInFiles,
-  stripAnsiCodes,
+  getDiagnosticExitResult,
 } from "./util.ts";
 
 const { files, specifiedFiles, errorsInChangedOnly, remainingArgsToForward, projectValue } =
@@ -15,14 +14,8 @@ const { files, specifiedFiles, errorsInChangedOnly, remainingArgsToForward, proj
 const tmpTsconfigPath = createAndSetupTsConfig(files, projectValue);
 
 /**
- * Resolves the JS entry of the installed vue-tsc package.
- *
- * 优先从 cwd 解析：dlx/npx 场景下 bundle 在临时沙箱里，从自身位置解析
- * 拿到的是沙箱自动安装的 peer 副本，版本可能与项目不符。定位 package.json
- * 再拼 bin 路径，而不是推导 ../.bin/vue-tsc：pnpm 的符号链接布局下真实
- * 包旁边没有 .bin。
- *
- * @returns The absolute path of vue-tsc's cli entry file.
+ * cwd 优先，避免 dlx/npx 命中沙箱 peer 副本；从 package.json 拼 bin 路径，
+ * 因为 pnpm 符号链接布局下真实包旁边没有 .bin。
  */
 function resolveVueTscEntry(): string {
   const requires = createResolverRequires();
@@ -68,13 +61,8 @@ if (!errorsInChangedOnly) {
   process.exit(status ?? 1);
 }
 
-// --errors-in-changed-only: 需要解析输出，不能用 stdio: "inherit" 直接透传。
-// 完整输出原样打印，但只有指定文件自身的 error（和全局配置错误）影响退出码，
-// 传递依赖的历史错误原样展示但不阻断。
-// 注意：与 inherit 模式的实时交错输出不同，这里会先打印全部 stdout 再打印
-// 全部 stderr；tsc 的诊断都走 stdout，stderr 只有异常信息，实际影响可忽略。
-// spawnSync 默认 maxBuffer 为 1MB，大仓库输出超限会杀掉子进程并截断输出，
-// 而恰恰是这个模式需要完整输出做归属解析，故放宽到 64MB。
+// 归属解析需要捕获完整输出；先打印 stdout 再打印 stderr，不保留实时交错顺序。
+// buffer 放宽到 64MB，避免默认 1MB 上限杀掉子进程并截断待解析诊断。
 const result = spawnSync(process.execPath, vueTscArgs, {
   encoding: "utf8",
   maxBuffer: 64 * 1024 * 1024,
@@ -91,24 +79,18 @@ if (result.error) {
     process.stderr.write(result.stderr);
   }
 
-  const status = result.status ?? 1;
-  if (status !== 0) {
-    const output = `${result.stdout ?? ""}\n${result.stderr ?? ""}`;
-    const { errorsInSpecifiedFiles, globalErrors } = filterErrorsInFiles(output, specifiedFiles);
-
-    if (errorsInSpecifiedFiles.length > 0 || globalErrors.length > 0) {
-      process.exitCode = status;
-    } else if (!/error TS\d+:/.test(stripAnsiCodes(output))) {
-      // 非零退出但输出里没有任何可识别的诊断（如 vue-tsc 自身崩溃），
-      // 保守起见按失败处理
-      process.exitCode = status;
-    } else {
-      console.error(
-        `\nNote: vue-tsc reported errors only in transitively compiled files, ` +
-          `which are ignored by --errors-in-changed-only (exit 0).`,
-      );
-    }
+  const output = `${result.stdout ?? ""}\n${result.stderr ?? ""}`;
+  const { exitCode, ignoredDependencyErrors } = getDiagnosticExitResult(
+    result.status,
+    output,
+    specifiedFiles,
+  );
+  if (ignoredDependencyErrors) {
+    console.error(
+      `\nNote: vue-tsc reported errors only in transitively compiled files, ` +
+        `which are ignored by --errors-in-changed-only (exit 0).`,
+    );
   }
-  // 不用 process.exit：对管道的 stdout/stderr 写入是异步的，立即退出
-  // 可能截断尾部输出；设置 exitCode 让事件循环自然排空
+  // process.exitCode 让异步管道写入自然排空，避免 process.exit 截断尾部输出。
+  process.exitCode = exitCode;
 }
