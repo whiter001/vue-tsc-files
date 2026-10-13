@@ -107,6 +107,40 @@ test("setupArgs 未传 flag 时 errorsInChangedOnly 为 false", () => {
   });
 });
 
+test("setupArgs 大量参数保持顺序、去重及透传语义", () => {
+  const targets = Array.from({ length: 3000 }, (_, i) => `src/file-${i}.ts`);
+  withArgv(["--pretty", "false", ...targets, "-p", "config.json", ...targets, "--noEmit"], () => {
+    const { files, specifiedFiles, projectValue, remainingArgsToForward } = setupArgs();
+    assert.deepEqual(specifiedFiles, targets);
+    assert.deepEqual(files, targets);
+    assert.notEqual(files, specifiedFiles);
+    assert.equal(projectValue, "config.json");
+    assert.deepEqual(remainingArgsToForward, ["--pretty", "false", "--noEmit"]);
+  });
+});
+
+test("setupArgs 保留 -p 值与连写参数的文件预扫描语义", () => {
+  for (const projectArgs of [
+    ["-p", "config.ts"],
+    ["--project", "config.ts"],
+    ["--project=config.ts"],
+    ["-p=config.ts"],
+  ]) {
+    withArgv(["first.vue", ...projectArgs, "--strict", "false", "first.vue"], () => {
+      const { specifiedFiles, projectValue, remainingArgsToForward } = setupArgs();
+      // 预扫描有意保留看似文件的 project 值（连写时保留整个参数）。
+      assert.deepEqual(specifiedFiles, ["first.vue", projectArgs.at(-1)]);
+      assert.equal(projectValue, "config.ts");
+      assert.deepEqual(remainingArgsToForward, ["--strict", "false"]);
+    });
+  }
+  withArgv(["a.ts", "-p", "--help", "--project=last.json", "--pretty"], () => {
+    const { projectValue, remainingArgsToForward } = setupArgs();
+    assert.equal(projectValue, "last.json");
+    assert.deepEqual(remainingArgsToForward, ["--pretty"]);
+  });
+});
+
 test("setupArgs 显式文件按首次出现顺序去重，files 与 specifiedFiles 独立", () => {
   withArgv(["src/b.vue", "src/a.ts", "src/b.vue", "src/c.ts", "src/a.ts"], () => {
     const { files, specifiedFiles } = setupArgs();

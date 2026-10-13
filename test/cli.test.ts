@@ -1,7 +1,15 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "child_process";
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync, readdirSync } from "fs";
+import {
+  mkdtempSync,
+  mkdirSync,
+  writeFileSync,
+  rmSync,
+  readdirSync,
+  realpathSync,
+  symlinkSync,
+} from "fs";
 import { tmpdir } from "os";
 import { join, dirname } from "path";
 import { fileURLToPath } from "url";
@@ -589,6 +597,111 @@ for (const [name, diagnostic, status] of [
     }
   });
 }
+
+const BLOCK_TYPESCRIPT = `
+const Module = require("module");
+const load = Module._load;
+Module._load = function(request, ...args) {
+  if (request === "typescript") {
+    console.error("TYPESCRIPT_LOAD_BLOCKED");
+    throw new Error("blocked typescript for regression test");
+  }
+  return load.call(this, request, ...args);
+};
+`;
+
+for (const flag of ["-h", "--help", "--changed", "--staged", "--unstaged"]) {
+  test(`${flag} 早退出不请求 TypeScript（包括 bundle 回退）`, () => {
+    const root = createGitFixture({ "block.cjs": BLOCK_TYPESCRIPT });
+    try {
+      const result = spawnSync(
+        process.execPath,
+        ["--require", join(root, "block.cjs"), CLI, flag],
+        {
+          cwd: root,
+          encoding: "utf8",
+        },
+      );
+      assert.equal(result.status, 0, result.stderr);
+      assert.doesNotMatch(result.stdout + result.stderr, /TYPESCRIPT_LOAD_BLOCKED/);
+      assert.match(
+        result.stdout,
+        flag.endsWith("h") || flag === "--help" ? /Usage:/ : /No .* files/,
+      );
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+}
+
+test("无参数不加载 TypeScript；有目标缺少 TypeScript 仍以 1 退出", () => {
+  const root = createFixture({ "block.cjs": BLOCK_TYPESCRIPT, "good.ts": "export default 1;" });
+  try {
+    for (const args of [[], ["good.ts"]]) {
+      const result = spawnSync(
+        process.execPath,
+        ["--require", join(root, "block.cjs"), CLI, ...args],
+        { cwd: root, encoding: "utf8" },
+      );
+      assert.equal(result.status, 1, result.stderr);
+      if (args.length === 0) {
+        assert.doesNotMatch(result.stderr, /TYPESCRIPT_LOAD_BLOCKED/);
+        assert.match(result.stderr, /No files to check/);
+      } else {
+        assert.equal(result.stderr.match(/TYPESCRIPT_LOAD_BLOCKED/g)?.length, 2);
+        assert.match(result.stderr, /Cannot find typescript/);
+      }
+    }
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("重复创建有效配置仅成功加载一次 cwd TypeScript", () => {
+  const root = realpathSync(createFixture({ "good.ts": "export default 1;" }));
+  const utilUrl = new URL("../src/util.ts", import.meta.url).href;
+  try {
+    mkdirSync(join(root, "node_modules"));
+    symlinkSync(
+      realpathSync(join(dirname(CLI), "node_modules", "typescript")),
+      join(root, "node_modules", "typescript"),
+      process.platform === "win32" ? "junction" : "dir",
+    );
+    writeFileSync(
+      join(root, "count.cjs"),
+      `const Module = require("module");
+const load = Module._load;
+Module._load = function(request, ...args) {
+  if (request === "typescript") console.error("TYPESCRIPT_LOAD_COUNT");
+  return load.call(this, request, ...args);
+};`,
+    );
+    const result = spawnSync(
+      process.execPath,
+      [
+        "--require",
+        join(root, "count.cjs"),
+        "--input-type=module",
+        "-e",
+        `import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import { createAndSetupTsConfig } from ${JSON.stringify(utilUrl)};
+const read = () => JSON.parse(readFileSync(createAndSetupTsConfig(["good.ts"]), "utf8"));
+const first = read();
+assert.deepEqual(read(), first);
+assert.deepEqual(first.files, [${JSON.stringify(join(root, "good.ts"))}]);
+assert.equal(first.compilerOptions.strict, true);
+assert.equal(first.compilerOptions.skipLibCheck, true);`,
+      ],
+      { cwd: root, encoding: "utf8" },
+    );
+    assert.equal(result.status, 0, result.stdout + result.stderr);
+    assert.equal(result.stderr.match(/TYPESCRIPT_LOAD_COUNT/g)?.length, 1);
+    assert.deepEqual(readdirSyncTmpConfigs(root), []);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
 
 function readdirSyncTmpConfigs(root: string) {
   return readdirSync(root).filter((f: string) => /^tsconfig\..+\.json$/.test(f));

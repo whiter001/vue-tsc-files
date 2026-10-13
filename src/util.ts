@@ -32,7 +32,10 @@ function loadTypescript(): typeof tsTypes {
   process.exit(1);
 }
 
-const ts = loadTypescript();
+let cachedTypescript: typeof tsTypes | undefined;
+function getTypescript(): typeof tsTypes {
+  return (cachedTypescript ??= loadTypescript());
+}
 
 /** 只让指定文件自身的 error 影响退出码的开关（--changed-only 为别名） */
 const ERRORS_IN_CHANGED_ONLY_FLAGS = new Set(["--errors-in-changed-only", "--changed-only"]);
@@ -81,6 +84,7 @@ export function setupArgs() {
   const args = process.argv.slice(2);
 
   const explicitFiles = getTscFiles(args);
+  const explicitFileSet = new Set(explicitFiles);
   let errorsInChangedOnly = false;
   let changed = false;
   let staged = false;
@@ -132,13 +136,13 @@ export function setupArgs() {
       unstaged = true;
       continue;
     }
-    if (explicitFiles.includes(arg)) {
+    if (explicitFileSet.has(arg)) {
       continue;
     }
     remainingArgsToForward.push(arg);
   }
 
-  const seen = new Set(explicitFiles);
+  const seen = explicitFileSet;
   const collectors = [
     [changed, getChangedFiles],
     [staged, getStagedFiles],
@@ -186,6 +190,7 @@ export function randomChars() {
 /** 沿 extends 解析选项，并仅收集项目 include/exclude/files 范围内的 .d.ts。 */
 // `ts` 是运行时加载的值绑定，不能用于限定类型名；类型位置走类型专用导入
 function getParsedProjectConfig(tsconfigPath: string): tsTypes.ParsedCommandLine | undefined {
+  const ts = getTypescript();
   return ts.getParsedCommandLineOfConfigFile(tsconfigPath, undefined, {
     ...ts.sys,
     // 配置文件此前已成功读取，这里不会再触发不可恢复诊断
@@ -333,6 +338,7 @@ export function getUnstagedFiles(): string[] {
 
 /** 使用 TS 配置读取器支持注释、尾逗号，并为非法配置提供诊断。 */
 function getRootTsConfig(tsconfigPath: string): TSConfig {
+  const ts = getTypescript();
   const result = ts.readConfigFile(tsconfigPath, ts.sys.readFile);
 
   if (result.error) {
