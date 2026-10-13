@@ -44,12 +44,12 @@
   },
   "devDependencies": {
     "@json-types/tsconfig": "^0.11.0",
-    "@types/node": "^26.6.3",
-    "oxfmt": "^0.70.0",
-    "oxlint": "^1.85.0",
-    "rolldown": "^1.2.11",
+    "@types/node": "^26.6.5",
+    "oxfmt": "^0.72.0",
+    "oxlint": "^1.87.0",
+    "rolldown": "^1.2.13",
     "typescript": "^6.0.3",
-    "vue-tsc": "^3.0.0"
+    "vue-tsc": "^3.3.13"
   },
   "peerDependencies": {
     "typescript": ">=5.0.0",

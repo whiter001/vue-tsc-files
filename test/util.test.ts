@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync } from "fs";
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, realpathSync, rmSync } from "fs";
 import { tmpdir } from "os";
 import { dirname, isAbsolute, join } from "path";
 import {
@@ -233,7 +233,7 @@ test("createAndSetupTsConfig 按 tsconfig 范围收集 d.ts、尊重用户 skipL
     assert.ok(!fileNames.some((f: string) => f.endsWith("stray.d.ts")));
     // #1：files 统一为绝对路径，tmp 配置与原 tsconfig 同目录
     assert.ok(config.files.every((f: string) => isAbsolute(f)));
-    assert.equal(dirname(tmpPath), root);
+    assert.equal(realpathSync(dirname(tmpPath)), realpathSync(root));
   } finally {
     process.chdir(prevCwd);
     if (tmpPath) rmSync(tmpPath, { force: true });
@@ -318,7 +318,7 @@ test("createAndSetupTsConfig project 传目录时读取其中的 tsconfig.json",
     // tmp 配置创建在解析出的 tsconfig（目录内的）旁边
     const config = JSON.parse(readFileSync(tmpPath, "utf8"));
     assert.ok(config.files.some((f: string) => f.endsWith("good.ts")));
-    assert.equal(dirname(tmpPath), root);
+    assert.equal(realpathSync(dirname(tmpPath)), realpathSync(root));
   } finally {
     process.chdir(prevCwd);
     if (tmpPath) rmSync(tmpPath, { force: true });
