@@ -17,7 +17,7 @@ pnpm test       # builds first (pretest), then node:test unit + integration test
 
 - Runtime: Node >= 20.19; development: Node >= 22.18 (tests and the release script use Node's built-in type stripping).
 - Source lives in `src/` (only `cli.ts` + `util.ts`); the root `vue-tsc-files` file is the gitignored build output — never edit it directly.
-- Release: `node scripts/release.mjs [patch|minor|major|x.y.z] [--commit] [--dry-run] [--yes]`. Unknown flags abort; a real publish asks for confirmation unless `--yes`.
+- Release: `node scripts/release.mjs [patch|minor|major|x.y.z] [--commit] [--dry-run] [--yes]`. Unknown flags abort; a real publish asks for confirmation unless `--yes`. `--commit` requires an empty index before publishing, creates an annotated tag, and pushes the branch plus that tag. A Git failure after publishing preserves the published version; only a failed publish rolls back the script's version edit.
 
 ## Issue reporting convention (mandatory)
 
@@ -50,5 +50,5 @@ Any problem you (the AI assistant) discover while **using** this package — mis
 ## Code style
 
 - Match the existing conventions: TypeScript ESM, no comments that restate the code, Chinese comments for non-obvious rationale (the codebase mixes English docstrings with Chinese rationale comments).
-- Every behavior fix ships with a test: unit tests in `test/util.test.ts`, end-to-end CLI tests in `test/cli.test.ts`.
+- Every behavior fix ships with a test: unit tests in `test/util.test.ts`, end-to-end CLI tests in `test/cli.test.ts`, and isolated release workflow tests in `test/release.test.ts` (stub npm/pnpm; local bare remotes only).
 - `pnpm check` and `pnpm test` must both pass before committing.

@@ -1,4 +1,4 @@
-import { writeFileSync, unlinkSync, existsSync, statSync } from "fs";
+import { writeFileSync, unlinkSync, existsSync, statSync, readFileSync } from "fs";
 import { dirname, join, resolve, relative } from "path";
 import { randomBytes } from "crypto";
 import { spawnSync } from "child_process";
@@ -77,47 +77,60 @@ Flags:
   -h, --help                  Show this help
 
 File arguments and the collection flags can be mixed; the union is checked.
---noEmit is always passed to vue-tsc; any other flags are forwarded as-is.
+--noEmit is always passed to vue-tsc; other compiler flags are forwarded.
+Response-file arguments (@file) are not supported; pass arguments directly.
+Ambiguous forwarding that changes option meaning is rejected; use explicit values.
+If incremental/composite is effectively enabled, the buildinfo cache is redirected
+to a per-run temporary file — your configured or CLI-passed cache is never touched —
+and removed together with the temporary tsconfig after the check.
 `;
 
 export function setupArgs() {
   const args = process.argv.slice(2);
 
-  const explicitFiles = getTscFiles(args);
-  const explicitFileSet = new Set(explicitFiles);
   let errorsInChangedOnly = false;
   let changed = false;
   let staged = false;
   let unstaged = false;
-
-  // 单次遍历同时剔除文件参数和 -p/--project 及其值。
-  // 不能先过滤文件再按原始索引 splice：文件参数出现在 -p 之前时索引会错位，
-  // 导致残留的 -p 被转发给 vue-tsc 并与内部传入的 -p 冲突。
   let projectValue: string | undefined;
-  const remainingArgsToForward: string[] = [];
+
+  // project 在解析上下文中保留边界，但不转发给子进程。
+  const rest: string[] = [];
+  const projectIndices = new Set<number>();
   for (let i = 0; i < args.length; i++) {
     const arg = args[i]!;
     if (HELP_FLAGS.has(arg)) {
-      // 在任何文件收集和 tsconfig 读取之前生效，保证无 tsconfig 的目录里也能用
       console.log(HELP_TEXT);
       process.exit(0);
     }
-    if (arg === "-p" || arg === "--project") {
+    const lower = arg.toLowerCase();
+    if (lower === "-p" || lower === "--p" || lower === "-project" || lower === "--project") {
       const value = args[i + 1];
       if (value === undefined) {
         console.error(`${arg} requires a tsconfig path argument.`);
         process.exit(1);
       }
       projectValue = value;
+      projectIndices.add(rest.length);
+      projectIndices.add(rest.length + 1);
+      rest.push("--project", value);
       i++;
       continue;
     }
-    if (arg.startsWith("--project=") || arg.startsWith("-p=")) {
+    if (
+      lower.startsWith("-p=") ||
+      lower.startsWith("--p=") ||
+      lower.startsWith("-project=") ||
+      lower.startsWith("--project=")
+    ) {
       projectValue = arg.slice(arg.indexOf("=") + 1);
       if (!projectValue) {
         console.error(`${arg} requires a non-empty tsconfig path.`);
         process.exit(1);
       }
+      projectIndices.add(rest.length);
+      projectIndices.add(rest.length + 1);
+      rest.push("--project", projectValue);
       continue;
     }
     if (ERRORS_IN_CHANGED_ONLY_FLAGS.has(arg)) {
@@ -136,13 +149,23 @@ export function setupArgs() {
       unstaged = true;
       continue;
     }
-    if (explicitFileSet.has(arg)) {
-      continue;
-    }
-    remainingArgsToForward.push(arg);
+    rest.push(arg);
   }
 
-  const seen = explicitFileSet;
+  if (rest.some((arg, index) => !projectIndices.has(index) && arg.startsWith("@"))) {
+    console.error("Response-file arguments (@file) are not supported; pass arguments directly.");
+    process.exit(1);
+  }
+
+  const sourceIndices: number[] = [];
+  for (let i = 0; i < rest.length; i++) {
+    if (!projectIndices.has(i) && !rest[i]!.startsWith("-") && isTscFile(rest[i]!)) {
+      sourceIndices.push(i);
+    }
+  }
+
+  // git 收集不加载 TS
+  const gitFiles: string[] = [];
   const collectors = [
     [changed, getChangedFiles],
     [staged, getStagedFiles],
@@ -151,10 +174,50 @@ export function setupArgs() {
   for (const [enabled, collect] of collectors) {
     if (!enabled) continue;
     for (const file of collect()) {
-      seen.add(file);
+      gitFiles.push(file);
     }
   }
+
+  const resolvedSources = new Set(sourceIndices);
+  if (sourceIndices.length > 0 && rest.some((arg) => arg.startsWith("-"))) {
+    // 用位置标记区分同名文件和 option 值，并保留 project 对 list option 的边界。
+    const prefix = `__vue_tsc_files_${randomChars()}_`;
+    const markedArgs = rest.map((arg, index) =>
+      resolvedSources.has(index) ? `${prefix}${index}.ts` : arg,
+    );
+    const fileNames = new Set(getTypescript().parseCommandLine(markedArgs).fileNames);
+    for (const index of sourceIndices) {
+      if (!fileNames.has(markedArgs[index]!)) {
+        resolvedSources.delete(index);
+      }
+    }
+  }
+
+  const seen = new Set([...resolvedSources].map((index) => rest[index]!));
+  for (const file of gitFiles) {
+    seen.add(file);
+  }
+  const remainingArgsToForward = rest.filter(
+    (_, index) => !projectIndices.has(index) && !resolvedSources.has(index),
+  );
+
   const specifiedFiles = [...seen];
+
+  if (specifiedFiles.length > 0 && rest.some((arg) => arg.startsWith("-"))) {
+    const ts = getTypescript();
+    const original = ts.parseCommandLine(rest).options;
+    const forwarded = ts.parseCommandLine([...remainingArgsToForward, "--noEmit"]).options;
+    const keys = new Set([...Object.keys(original), ...Object.keys(forwarded)]);
+    keys.delete("project");
+    keys.delete("noEmit");
+    if (
+      forwarded.noEmit !== true ||
+      [...keys].some((key) => JSON.stringify(original[key]) !== JSON.stringify(forwarded[key]))
+    ) {
+      console.error("Cannot safely forward compiler options: provide explicit option values.");
+      process.exit(1);
+    }
+  }
 
   if (specifiedFiles.length === 0) {
     if (changed || staged || unstaged) {
@@ -356,14 +419,21 @@ function createTmpTsConfig(
   files: string[],
   configDir: string,
   userSkipLibCheck?: boolean,
+  manageBuildInfo?: boolean,
 ) {
-  const tmpTsconfigPath = join(configDir, `tsconfig.${randomChars()}.json`);
+  // buildinfo 与 tmp 配置共用随机后缀：独占临时、不污染用户缓存，CLI 也能由 tmp 路径推导出它
+  const suffix = randomChars();
+  const tmpTsconfigPath = join(configDir, `tsconfig.${suffix}.json`);
+  const buildInfoPath = manageBuildInfo
+    ? join(configDir, `tsconfig.${suffix}.tsbuildinfo`)
+    : undefined;
   const tmpTsconfig = {
     ...rootTsConfig,
     compilerOptions: {
       // 默认开启 skipLibCheck 加速检查；用户显式配置（含 extends 继承值）优先。
       ...(userSkipLibCheck === undefined ? { skipLibCheck: true } : {}),
       ...rootTsConfig.compilerOptions,
+      ...(buildInfoPath ? { tsBuildInfoFile: buildInfoPath } : {}),
     },
     // files 按 tmp tsconfig 所在目录解析，统一写成绝对路径，
     // 避免 -p 指向子目录 tsconfig 时 cwd 相对路径错位
@@ -373,6 +443,7 @@ function createTmpTsConfig(
   writeFileSync(tmpTsconfigPath, JSON.stringify(tmpTsconfig, null, 2));
 
   registerCleanupHandler(tmpTsconfigPath);
+  if (buildInfoPath) registerCleanupHandler(buildInfoPath);
 
   return tmpTsconfigPath;
 }
@@ -384,17 +455,17 @@ const SIGNAL_EXIT_CODES = {
   SIGTERM: 143,
 } as const;
 
-/** 待清理的临时 tsconfig 路径；监听器全局只注册一次，避免多次调用累积 listener */
-const tmpTsconfigPaths = new Set<string>();
+/** 待清理的临时产物路径（临时 tsconfig / 独占 buildinfo）；监听器全局只注册一次，避免多次调用累积 listener */
+const tmpArtifactPaths = new Set<string>();
 let cleanupHandlersRegistered = false;
 
-function registerCleanupHandler(tmpTsconfigPath: string) {
-  tmpTsconfigPaths.add(tmpTsconfigPath);
+function registerCleanupHandler(artifactPath: string) {
+  tmpArtifactPaths.add(artifactPath);
   if (cleanupHandlersRegistered) return;
   cleanupHandlersRegistered = true;
 
   const cleanup = () => {
-    for (const path of tmpTsconfigPaths) {
+    for (const path of tmpArtifactPaths) {
       try {
         unlinkSync(path);
       } catch {
@@ -413,7 +484,32 @@ function registerCleanupHandler(tmpTsconfigPath: string) {
   }
 }
 
-export function createAndSetupTsConfig(files: string[], argsProjectValue?: string) {
+/** 声明文件扩展名：.d.ts/.d.mts/.d.cts（忽略大小写，对齐 isTscFile 的语义）。 */
+function isDeclarationFileName(name: string) {
+  return /\.d\.[cm]?ts$/i.test(name);
+}
+
+/**
+ * buildinfo 是否应由本次运行独占接管：incremental/composite 生效即可。
+ * 两项各自 CLI 覆盖配置后取或，composite 不因 incremental:false 被屏蔽。
+ * 无有效 incremental 时不接管，避免向 tsc 注入未启用 incremental 的缓存选项。
+ */
+function shouldManageBuildInfo(
+  parsed: tsTypes.ParsedCommandLine | undefined,
+  remainingArgsToForward: string[],
+) {
+  const forwarded = getTypescript().parseCommandLine(remainingArgsToForward).options;
+  return Boolean(
+    (forwarded.incremental ?? parsed?.options.incremental) ||
+    (forwarded.composite ?? parsed?.options.composite),
+  );
+}
+
+export function createAndSetupTsConfig(
+  files: string[],
+  argsProjectValue?: string,
+  remainingArgsToForward: string[] = [],
+) {
   let tsconfigPath = argsProjectValue
     ? resolve(process.cwd(), argsProjectValue)
     : resolve(process.cwd(), "tsconfig.json");
@@ -424,23 +520,68 @@ export function createAndSetupTsConfig(files: string[], argsProjectValue?: strin
   }
   const rootTsConfig = getRootTsConfig(tsconfigPath);
   const parsed = getParsedProjectConfig(tsconfigPath);
-  const dtsFiles = parsed?.fileNames.filter((name) => name.endsWith(".d.ts")) ?? [];
+
+  // 原配置的解析错误在生成 tmp/覆盖 buildinfo 之前报出：compilerOptions/extends 等错误
+  // 不能被 override 抹掉，落点可能是 .ts 文件，也不该交给依赖豁免过滤。
+  // 无输入（18002/18003）除外：files/include 会被 wrapper 替换，solution 式
+  // files:[]+references、显式文件在原 include 之外都合法
+  const configErrors = (parsed?.errors ?? []).filter(
+    (diagnostic) => diagnostic.code !== 18002 && diagnostic.code !== 18003,
+  );
+  if (configErrors.length > 0) {
+    const ts = getTypescript();
+    process.stderr.write(
+      ts.formatDiagnostics(configErrors, {
+        getCurrentDirectory: () => process.cwd(),
+        getCanonicalFileName: (fileName: string) => fileName,
+        getNewLine: () => "\n",
+      }),
+    );
+    process.exit(2);
+  }
+
+  const dtsFiles = parsed?.fileNames.filter(isDeclarationFileName) ?? [];
 
   // @json-types/tsconfig 的 TSConfig 不含 references 字段，按结构类型探测
   const references = (rootTsConfig as { references?: unknown[] }).references;
   if (Array.isArray(references) && references.length > 0) {
     console.error(
-      "Note: this tsconfig uses project references; referenced projects are not " +
-        "followed, so composite/declaration constraints of the solution are not applied.",
+      "Note: this tsconfig uses project references; they are kept in the generated config " +
+        "but referenced projects are not built automatically. Pre-build referenced projects " +
+        "first — their .d.ts outputs may be required for the check.",
     );
   }
+
+  // 生效时 buildinfo 走独占临时文件；判定见 shouldManageBuildInfo
+  const manageBuildInfo = shouldManageBuildInfo(parsed, remainingArgsToForward);
 
   return createTmpTsConfig(
     rootTsConfig,
     [...files, ...dtsFiles],
     dirname(tsconfigPath),
     parsed?.options.skipLibCheck,
+    manageBuildInfo,
   );
+}
+
+/** 与临时 tsconfig 同随机后缀的 companion buildinfo 路径（仅后缀名不同）。 */
+function getCompanionBuildInfoPath(tmpTsconfigPath: string) {
+  return tmpTsconfigPath.replace(/\.json$/, ".tsbuildinfo");
+}
+
+/**
+ * CLI 需在 forwarded args 之后追加的内部 --tsBuildInfoFile 值：命令行重复选项
+ * 后者覆盖前者，用户配置或显式传入的缓存路径因此不会被写入；未接管时返回 undefined。
+ */
+export function getInternalTsBuildInfoFile(tmpTsconfigPath: string): string | undefined {
+  const expected = getCompanionBuildInfoPath(tmpTsconfigPath);
+  try {
+    const compilerOptions = (JSON.parse(readFileSync(tmpTsconfigPath, "utf8")) as TSConfig)
+      .compilerOptions as { tsBuildInfoFile?: unknown } | undefined;
+    return compilerOptions?.tsBuildInfoFile === expected ? expected : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 /** 带位置信息的诊断行，如 src/a.ts(12,5): error TS2322: ... */
@@ -478,16 +619,25 @@ function normalizeDiagnosticPath(filePath: string): string {
 export interface ErrorFilterResult {
   /** 指定文件自身的错误行 */
   errorsInSpecifiedFiles: string[];
-  /** 不属于任何文件的全局错误（配置错误等），出现即视为失败 */
+  /** 全局错误：无位置的错误行，及落在临时配置/非受支持源文件上的诊断；出现即视为失败 */
   globalErrors: string[];
 }
 
 /**
  * 从合并的 stdout/stderr 收集指定文件和全局错误，忽略传递依赖错误。
- * specifiedFiles 仅含显式参数和 Git 收集文件；自动补入的 .d.ts 不参与归属。
+ * specifiedFiles 仅含显式参数和 Git 收集文件；自动补入的声明文件不参与归属。
+ * 落在临时配置上的诊断（配置错误，含 extends 链上报的 base.json/jsonc）以及落在
+ * 非受支持源文件（.json/.jsonc 等，含 JSON module）上的 TS 错误保守归为全局错误：
+ * 这些不是"传递依赖"的豁免对象。传了 tmpTsconfigPath 时临时配置自身的诊断也归全局。
  */
-export function filterErrorsInFiles(output: string, specifiedFiles: string[]): ErrorFilterResult {
+export function filterErrorsInFiles(
+  output: string,
+  specifiedFiles: string[],
+  tmpTsconfigPath?: string,
+): ErrorFilterResult {
   const targets = new Set(specifiedFiles.map(normalizeDiagnosticPath));
+  const tmpConfigTarget =
+    tmpTsconfigPath === undefined ? undefined : normalizeDiagnosticPath(tmpTsconfigPath);
   const errorsInSpecifiedFiles: string[] = [];
   const globalErrors: string[] = [];
 
@@ -495,8 +645,14 @@ export function filterErrorsInFiles(output: string, specifiedFiles: string[]): E
     const trimmed = stripAnsiCodes(line).trim();
     const located = LOCATED_ERROR_RE.exec(trimmed) ?? PRETTY_LOCATED_ERROR_RE.exec(trimmed);
     if (located) {
-      if (targets.has(normalizeDiagnosticPath(located[1]!))) {
+      const filePath = normalizeDiagnosticPath(located[1]!);
+      if (targets.has(filePath)) {
         errorsInSpecifiedFiles.push(line);
+        continue;
+      }
+      // 临时配置路径上的配置诊断、以及非受支持源文件上的 TS 错误，保守归全局
+      if (filePath === tmpConfigTarget || !isTscFile(filePath)) {
+        globalErrors.push(line);
       }
       continue;
     }
@@ -512,17 +668,28 @@ export function getDiagnosticExitResult(
   status: number | null,
   output: string,
   specifiedFiles: string[],
+  tmpTsconfigPath?: string,
 ): { exitCode: number; ignoredDependencyErrors: boolean } {
-  const exitCode = status ?? 1;
-  if (exitCode === 0) return { exitCode: 0, ignoredDependencyErrors: false };
+  // status 为 null 说明子进程被信号中断或异常崩溃：输出再"像"依赖错误也不能信，
+  // 配置诊断同样不可按依赖豁免，一律按失败处理。
+  if (status === null) {
+    return { exitCode: 1, ignoredDependencyErrors: false };
+  }
+  if (status === 0) return { exitCode: 0, ignoredDependencyErrors: false };
+  // --noEmit 的正常类型诊断退出码是 2；Windows 中断可能只表现为 status 1。
+  if (status !== 2) return { exitCode: status, ignoredDependencyErrors: false };
 
-  const { errorsInSpecifiedFiles, globalErrors } = filterErrorsInFiles(output, specifiedFiles);
+  const { errorsInSpecifiedFiles, globalErrors } = filterErrorsInFiles(
+    output,
+    specifiedFiles,
+    tmpTsconfigPath,
+  );
   if (errorsInSpecifiedFiles.length > 0 || globalErrors.length > 0) {
-    return { exitCode, ignoredDependencyErrors: false };
+    return { exitCode: status, ignoredDependencyErrors: false };
   }
   // 非零退出却没有可识别诊断（如 vue-tsc 崩溃），保守按失败处理。
   if (!/error TS\d+:/.test(stripAnsiCodes(output))) {
-    return { exitCode, ignoredDependencyErrors: false };
+    return { exitCode: status, ignoredDependencyErrors: false };
   }
   return { exitCode: 0, ignoredDependencyErrors: true };
 }

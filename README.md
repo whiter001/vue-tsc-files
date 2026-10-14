@@ -46,12 +46,14 @@ A failed type check (or a failed spawn) always exits with a non-zero code. When 
 
 ## Only fail on errors in the specified files
 
-`vue-tsc` compiles the specified files together with everything they transitively import, so the output may contain pre-existing type errors in files you did not touch. Pass `--errors-in-changed-only` (alias: `--changed-only`) to ignore those: the full output is still printed, but only errors reported in the files passed on the command line (plus global config errors) affect the exit code.
+`vue-tsc` compiles the specified files together with everything they transitively import. Pass `--errors-in-changed-only` (alias: `--changed-only`) to ignore errors in non-target source files: the full output is still printed, but only errors in explicitly passed or Git-collected files affect the diagnostic exit code. Configuration errors and abnormal child-process termination always fail.
+
+Filtering is file-based, not a comparison against a Git baseline or changed lines. Existing errors in target files still fail; newly introduced errors in non-target dependencies may be ignored. Automatically collected declaration files are not targets unless explicitly passed or collected by Git.
 
 ```json
 {
   "lint-staged": {
-    "**/*.{vue,ts,tsx}": "vue-tsc-files --errors-in-changed-only"
+    "**/*.{vue,ts,tsx,mts,cts}": "vue-tsc-files --errors-in-changed-only"
   }
 }
 ```
@@ -111,15 +113,17 @@ curl -fsSL -o .agents/skills/vue-tsc-files/SKILL.md \
 
 ## Sidenotes
 
-Flag "--noEmit" is always passed to underlying `vue-tsc` by default.
+Flag "--noEmit" is always passed to underlying `vue-tsc` by default. Response-file arguments (`@file`) are not supported; pass arguments directly. Ambiguous argument combinations that would change compiler-option meaning during forwarding are rejected; provide explicit option values.
 
-`vue-tsc-files` passes module declarations and namespaces from `d.ts` files to `vue-tsc`, so please make sure that needed declarations are inside `d.ts` files. The `d.ts` files are collected using your tsconfig's own `include`/`exclude`/`files` scope (`extends` chains included), so declarations the project itself would not compile are not pulled in.
+`vue-tsc-files` collects `.d.ts`, `.d.mts` and `.d.cts` declarations using your tsconfig's own `include`/`exclude`/`files` scope (`extends` chains included), so declarations the project itself would not compile are not pulled in.
 
 `skipLibCheck` defaults to `true` for faster checks; an explicit `skipLibCheck` in your tsconfig (either `true` or `false`) always wins.
 
 The temporary tsconfig is created next to the original one (and removed afterwards), so relative `extends`, `baseUrl`, `paths` and other path-based options resolve exactly as they do for your own config.
 
-Project `references` are not followed: when checking a solution-style tsconfig, the composite/declaration constraints of referenced projects are not applied (a note is printed when references are detected).
+When incremental or composite checking is enabled, the wrapper uses a per-run temporary build-info file and removes it afterwards. It overrides configured and CLI `tsBuildInfoFile` paths to avoid modifying your project's persistent cache; there is no cross-run incremental cache reuse. Force-killing the process or a machine crash may prevent cleanup.
+
+Project `references` are preserved, but referenced projects are not automatically built or checked as a complete solution. Their declaration outputs may need to be built first, otherwise errors such as TS6305 can still occur. The wrapper does not remove `composite` or `declaration` options (a note is printed when references are detected).
 
 ```javascript
 // example.d.ts

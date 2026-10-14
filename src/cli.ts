@@ -6,12 +6,13 @@ import {
   createAndSetupTsConfig,
   createResolverRequires,
   getDiagnosticExitResult,
+  getInternalTsBuildInfoFile,
 } from "./util.ts";
 
 const { files, specifiedFiles, errorsInChangedOnly, remainingArgsToForward, projectValue } =
   setupArgs();
 
-const tmpTsconfigPath = createAndSetupTsConfig(files, projectValue);
+const tmpTsconfigPath = createAndSetupTsConfig(files, projectValue, remainingArgsToForward);
 
 /**
  * cwd 优先，避免 dlx/npx 命中沙箱 peer 副本；从 package.json 拼 bin 路径，
@@ -47,7 +48,17 @@ try {
   process.exit(1);
 }
 
-const vueTscArgs = [vueTscEntry, "-p", tmpTsconfigPath, ...remainingArgsToForward, "--noEmit"];
+// incremental/composite 生效时，在 forwarded args 之后追加内部 --tsBuildInfoFile：
+// 命令行重复选项后者覆盖前者，用户配置或显式传入的缓存路径因此不会被写入
+const internalBuildInfoFile = getInternalTsBuildInfoFile(tmpTsconfigPath);
+const vueTscArgs = [
+  vueTscEntry,
+  "-p",
+  tmpTsconfigPath,
+  ...remainingArgsToForward,
+  ...(internalBuildInfoFile ? ["--tsBuildInfoFile", internalBuildInfoFile] : []),
+  "--noEmit",
+];
 
 if (!errorsInChangedOnly) {
   const { status, error } = spawnSync(process.execPath, vueTscArgs, { stdio: "inherit" });
@@ -80,11 +91,11 @@ if (result.error) {
   }
 
   const output = `${result.stdout ?? ""}\n${result.stderr ?? ""}`;
-  const { exitCode, ignoredDependencyErrors } = getDiagnosticExitResult(
-    result.status,
-    output,
-    specifiedFiles,
-  );
+  // 子进程被信号终止（signal 非 null，或 status 为 null）时输出不可信，绝不按依赖豁免
+  const interrupted = result.signal !== null || result.status === null;
+  const { exitCode, ignoredDependencyErrors } = interrupted
+    ? { exitCode: 1, ignoredDependencyErrors: false }
+    : getDiagnosticExitResult(result.status, output, specifiedFiles, tmpTsconfigPath);
   if (ignoredDependencyErrors) {
     console.error(
       `\nNote: vue-tsc reported errors only in transitively compiled files, ` +

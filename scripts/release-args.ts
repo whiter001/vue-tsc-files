@@ -5,9 +5,17 @@ export const RELEASE_USAGE = `Usage: node scripts/release.mjs [major|minor|patch
 
 Options:
   --dry-run   Print the plan (version bump, publish, git steps) without touching anything
-  --commit    After a successful publish, commit package.json, tag and push
+  --commit    After a successful publish, commit package.json, tag and push.
+              Requires an empty index: staged changes abort the run before
+              anything is published (unstaged edits are fine). The tag is
+              annotated and branch plus tag are pushed in one atomic push.
   --yes       Skip the confirmation prompt before publishing
   -h, --help  Show this help
+
+Notes:
+  With --commit the target version may already be the current one: a hand-edited
+  package.json is committed as it is; when there is nothing to commit the commit
+  is skipped, but the tag is still created and pushed.
 
 Examples:
   node scripts/release.mjs              # patch bump of the current version

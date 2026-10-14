@@ -46,12 +46,14 @@ npm 与 pnpm 都已支持。CLI 通过 `require.resolve` 定位已安装的 `vue
 
 ## 只对指定文件自身的错误失败
 
-`vue-tsc` 在编译指定文件的同时会一并编译它们传递依赖进来的所有内容，因此输出里可能夹杂你没碰过的文件中的历史错误。加上 `--errors-in-changed-only`（别名：`--changed-only`）可以忽略这些：完整输出仍然原样打印，但只有命令行传入的文件（加上全局配置错误）的错误才会影响退出码。
+`vue-tsc` 在编译指定文件的同时会一并编译它们传递依赖进来的内容。加上 `--errors-in-changed-only`（别名：`--changed-only`）可以忽略非目标源文件中的错误：完整输出仍然打印，但只有显式传入或 Git 收集的文件中的错误才影响诊断退出码。配置错误和子进程异常中断始终视为失败。
+
+过滤按文件归属进行，不比较 Git 基线或修改行。目标文件中的旧错误仍会阻断，非目标依赖中的新错误也可能被忽略。自动补充的声明文件不属于目标，除非它也被显式传入或由 Git 收集。
 
 ```json
 {
   "lint-staged": {
-    "**/*.{vue,ts,tsx}": "vue-tsc-files --errors-in-changed-only"
+    "**/*.{vue,ts,tsx,mts,cts}": "vue-tsc-files --errors-in-changed-only"
   }
 }
 ```
@@ -113,15 +115,17 @@ curl -fsSL -o .agents/skills/vue-tsc-files/SKILL.md \
 
 ## 备注
 
-默认会向底层 `vue-tsc` 始终传入 `--noEmit`。
+默认会向底层 `vue-tsc` 始终传入 `--noEmit`。不支持响应文件参数（`@file`），请直接传入参数。若歧义参数组合会在转发时改变编译选项的含义，工具会拒绝执行；请显式提供选项值。
 
-`vue-tsc-files` 会把 `d.ts` 文件里的模块声明和命名空间传给 `vue-tsc`，请确保所需声明位于 `d.ts` 文件中。`d.ts` 的收集遵循你的 tsconfig 自身的 `include`/`exclude`/`files` 范围（含 `extends` 链），项目本身不会编译的声明文件不会被拉进来。
+`vue-tsc-files` 会补充 `.d.ts`、`.d.mts` 和 `.d.cts` 声明文件。收集遵循你的 tsconfig 自身的 `include`/`exclude`/`files` 范围（含 `extends` 链），项目本身不会编译的声明文件不会被拉进来。
 
 `skipLibCheck` 默认开启以加速检查；如果你的 tsconfig 显式设置了 `skipLibCheck`（无论 `true` 还是 `false`），以你的配置为准。
 
 临时 tsconfig 会创建在原 tsconfig 所在目录（用后删除），因此相对的 `extends`、`baseUrl`、`paths` 等基于路径的选项解析结果与你的原始配置完全一致。
 
-不会跟随项目 `references`：对 solution 风格的 tsconfig 做检查时，被引用项目的 composite/declaration 约束不会生效（检测到 references 时会打印提示）。
+启用 incremental 或 composite 检查时，工具使用每次运行独立的临时 build-info 文件，用后删除。原配置及命令行中的 `tsBuildInfoFile` 路径会被覆盖，避免修改项目的持久缓存；不提供跨运行的增量缓存复用。强制终止进程或机器崩溃可能导致无法清理。
+
+项目 `references` 会被保留，但工具不会自动构建被引用项目，也不能代替完整的多项目检查。引用项目的声明输出可能需要预先构建，否则仍会出现 TS6305 等错误。工具不会移除 `composite` 或 `declaration` 选项（检测到 references 时会打印提示）。
 
 ```javascript
 // example.d.ts

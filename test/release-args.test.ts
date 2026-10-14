@@ -63,6 +63,13 @@ test("RELEASE_USAGE 提及全部选项", () => {
   }
 });
 
+test("RELEASE_USAGE 说明 --commit 的暂存区要求与 tag/push 语义", () => {
+  assert.match(RELEASE_USAGE, /empty index/);
+  assert.match(RELEASE_USAGE, /annotated/);
+  assert.match(RELEASE_USAGE, /atomic/);
+  assert.match(RELEASE_USAGE, /still created and pushed/);
+});
+
 test("bumpVersion 语义化升级", () => {
   assert.equal(bumpVersion("1.3.3", "patch"), "1.3.4");
   assert.equal(bumpVersion("1.3.3", "minor"), "1.4.0");
