@@ -202,14 +202,30 @@ declare module "@vue/runtime-core" {
 
 ## Development
 
-Runtime requirement is Node >= 20.19 (the `engines` field, applies to the published CLI). Development requires Node >= 22.18 because the tests and the release script run TypeScript sources via Node's built-in type stripping — the stricter version does not apply to end users.
+Runtime requirement is Node >= 20.19 (the `engines` field, applies to the published CLI). Development requires Node >= 22.18 because the tests, the benchmark and the release script run TypeScript sources via Node's built-in type stripping — the stricter version does not apply to end users.
 
 ```sh
 pnpm install
 pnpm build      # rolldown → vue-tsc-files
 pnpm check      # oxlint + oxfmt --check + tsc --noEmit
 pnpm test       # builds first (pretest), then node:test unit + integration tests
+pnpm bench      # builds first (prebench), then the performance matrix in bench/
 ```
+
+### Benchmark
+
+`bench/` measures where the time goes instead of asserting a budget — no threshold is enforced, because setting one before having numbers would be guesswork. It compares the wrapper against a direct `vue-tsc` run over the same files and the same compiler options, across simple TS, real Vue SFCs, a wide `include` range, an empty git selection and a large diagnostic output, each under cold, warm and incremental caches.
+
+Every timed run is validated before its timing is kept: the scenario declares the exit code, the key output and the exact diagnostic-line count the run must produce, and leftover temp files fail the run too. A fixture that broke would otherwise register as a suspiciously fast result.
+
+```sh
+pnpm bench                              # full matrix
+node bench/run.ts --quick               # 3 runs, warm cache only
+node bench/run.ts --scenario vue-sfc    # one scenario
+node bench/run.ts --json bench.json     # machine-readable results
+```
+
+Run it on its own — a concurrent build or test suite invalidates the numbers. Read the caveats printed with the table before comparing cells: process RSS excludes the `vue-tsc` child the wrapper spawns, and `--extendedDiagnostics` covers only the compiler's internal phases.
 
 ## License
 

@@ -204,14 +204,30 @@ declare module "@vue/runtime-core" {
 
 ## 开发
 
-运行时要求是 Node >= 20.19（`engines` 字段，面向使用已发布 CLI 的用户）。开发需要 Node >= 22.18，因为测试和发布脚本直接通过 Node 内置的类型剥离运行 TypeScript 源码——这个更高的版本要求不面向最终用户。
+运行时要求是 Node >= 20.19（`engines` 字段，面向使用已发布 CLI 的用户）。开发需要 Node >= 22.18，因为测试、基准和发布脚本直接通过 Node 内置的类型剥离运行 TypeScript 源码——这个更高的版本要求不面向最终用户。
 
 ```sh
 pnpm install
 pnpm build      # rolldown → vue-tsc-files
 pnpm check      # oxlint + oxfmt --check + tsc --noEmit
 pnpm test       # 先构建（pretest），再跑 node:test 单元 + 集成测试
+pnpm bench      # 先构建（prebench），再跑 bench/ 里的性能矩阵
 ```
+
+### 性能基准
+
+`bench/` 用来定位时间去哪了，而不是卡某个门槛——在有数字之前先定门槛是猜的，所以这里不设阈值。它把 wrapper 和直接调用 `vue-tsc` 做对照：同一批文件、同一套编译选项，覆盖简单 TS、真实 Vue SFC、宽 `include` 范围、git 无目标和大诊断输出，每种再分冷缓存、热缓存与增量缓存。
+
+每个被计时的运行都要先过校验才会保留：场景声明了这次运行该有的退出码、关键输出和**精确的诊断行数**，fixture 里残留的临时文件同样判失败。否则一个坏掉的 fixture 会以"跑得异常快"的样子混进基线。
+
+```sh
+pnpm bench                              # 完整矩阵
+node bench/run.ts --quick               # 3 轮，只跑热缓存
+node bench/run.ts --scenario vue-sfc    # 单个场景
+node bench/run.ts --json bench.json     # 机器可读结果
+```
+
+请单独运行，并行跑构建或测试套件会让数字失效。比较各列之前先读表格旁边打印的口径说明：进程 RSS 不含 wrapper spawn 出的 `vue-tsc` 子进程，而 `--extendedDiagnostics` 只覆盖编译器内部阶段。
 
 ## License
 

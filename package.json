@@ -40,7 +40,9 @@
     "check": "pnpm run lint && pnpm run fmt:check && npx tsc --noEmit",
     "prepublishOnly": "pnpm run check && pnpm run test",
     "pretest": "pnpm run build",
-    "test": "node --test \"test/*.test.ts\""
+    "test": "node --test \"test/*.test.ts\"",
+    "prebench": "pnpm run build",
+    "bench": "node bench/run.ts"
   },
   "devDependencies": {
     "@json-types/tsconfig": "^0.11.0",

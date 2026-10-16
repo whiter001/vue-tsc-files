@@ -15,10 +15,12 @@ pnpm install
 pnpm build      # rolldown → vue-tsc-files (the published bundle)
 pnpm check      # oxlint + oxfmt --check + tsc --noEmit
 pnpm test       # builds first (pretest), then node:test unit + integration tests
+pnpm bench      # builds first (prebench), then the performance matrix in bench/
 ```
 
-- Runtime: Node >= 20.19; development: Node >= 22.18 (tests and the release script use Node's built-in type stripping).
+- Runtime: Node >= 20.19; development: Node >= 22.18 (tests, the benchmark and the release script use Node's built-in type stripping).
 - Source lives in `src/` (only `cli.ts` + `util.ts`); the root `vue-tsc-files` file is the gitignored build output — never edit it directly.
+- `bench/` measures, it does not assert a budget. Scenarios live in `bench/scenarios.ts`; each declares the exit code, key output and diagnostic-line count the run must produce. Every timed run is validated before its timing is kept, so a broken fixture can never masquerade as a fast result, and leftover temp artifacts fail the run too. Run it standalone — a concurrent build or test suite invalidates the numbers.
 - Release: `node scripts/release.mjs [patch|minor|major|x.y.z] [--commit] [--dry-run] [--yes]`. Unknown flags abort; a real publish asks for confirmation unless `--yes`. `--commit` requires an empty index before publishing, creates an annotated tag, and pushes the branch plus that tag. A Git failure after publishing preserves the published version; only a failed publish rolls back the script's version edit.
 
 ## Issue reporting convention (mandatory)
