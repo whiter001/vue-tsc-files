@@ -6,6 +6,8 @@ Guidance for AI coding assistants working in this repository.
 
 `vue-tsc-files` — a tiny CLI that runs `vue-tsc` on specific files without ignoring `tsconfig.json`. Published as `@whiter001/vue-tsc-files`.
 
+It also ships an agent skill at `.agents/skills/vue-tsc-files/` (inside the npm package via `files`); users install it with `vue-tsc-files install --skill [--user]`, which copies that directory into `.agents/skills/` and never loads TypeScript.
+
 ## Commands
 
 ```sh

@@ -98,7 +98,21 @@ vue-tsc-files --unstaged --errors-in-changed-only
 
 本仓库自带一份 [Kimi Code](https://www.kimi.com/code/docs/en/) 兼容的 agent skill：[`.agents/skills/vue-tsc-files/SKILL.md`](./.agents/skills/vue-tsc-files/SKILL.md)。它教 AI 编码助手（Kimi Code 以及一切识别 `.agents/skills/` 约定的工具）在合适的时机用 `vue-tsc-files` 代替容易误报的裸 `vue-tsc <files>` 调用。
 
-skill 也随 npm 包一起分发——项目里已装 `@whiter001/vue-tsc-files` 时，直接从 `node_modules` 拷到该项目的 `.agents/skills/`（项目级）或 `~/.agents/skills/`（用户级）：
+skill 随 npm 包一起分发，一条命令即可装进当前项目：
+
+```sh
+npx @whiter001/vue-tsc-files install --skill
+```
+
+加上 `--user` 则装到 `~/.agents/skills/`，对所有项目生效，装一次就够：
+
+```sh
+npx @whiter001/vue-tsc-files install --skill --user
+```
+
+重复执行是安全的：内容与包内一致时原样跳过；不一致时报冲突而不是默默覆盖，确认要覆盖再加 `--force`。整个命令不加载 TypeScript，也不触发任何类型检查。
+
+想手动接线也行，同一个文件就在 `node_modules/@whiter001/vue-tsc-files/.agents/skills/vue-tsc-files/` 下：
 
 ```sh
 mkdir -p .agents/skills

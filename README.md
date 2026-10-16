@@ -96,7 +96,21 @@ Explicitly passed files, `--changed`, `--staged` and `--unstaged` can be mixed (
 
 This repository ships a ready-made [Kimi Code](https://www.kimi.com/code/docs/en/) agent skill at [`.agents/skills/vue-tsc-files/SKILL.md`](./.agents/skills/vue-tsc-files/SKILL.md). It teaches AI coding agents (Kimi Code and anything else that reads the `.agents/skills/` convention) when and how to use `vue-tsc-files` instead of the error-prone bare `vue-tsc <files>` invocation.
 
-The skill is also distributed inside the npm package — with `@whiter001/vue-tsc-files` already installed in a project, copy it from `node_modules` into that project's `.agents/skills/` (project scope) or into `~/.agents/skills/` (user scope):
+The skill is distributed inside the npm package, so one command installs it into the current project:
+
+```sh
+npx @whiter001/vue-tsc-files install --skill
+```
+
+Add `--user` to install it once for yourself into `~/.agents/skills/`, where it applies to every project:
+
+```sh
+npx @whiter001/vue-tsc-files install --skill --user
+```
+
+Re-running is safe: an installation that already matches the bundled skill is left alone, and one that differs is reported as a conflict instead of being overwritten — pass `--force` to replace it. The command never loads TypeScript or runs a type check.
+
+If you would rather wire it up by hand, the same file sits in `node_modules/@whiter001/vue-tsc-files/.agents/skills/vue-tsc-files/`:
 
 ```sh
 mkdir -p .agents/skills

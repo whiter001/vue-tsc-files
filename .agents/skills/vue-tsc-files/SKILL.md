@@ -64,6 +64,10 @@ lint-staged 配置示例（lint-staged 会自动追加匹配的文件路径，�
 pnpm exec vue-tsc-files --changed --errors-in-changed-only
 ```
 
+## 安装与更新本 skill
+
+本 skill 随 npm 包分发，用 `vue-tsc-files install --skill` 装进项目的 `.agents/skills/`，加 `--user` 装进 `~/.agents/skills/` 对所有项目生效；本地改过的版本重装时需要 `--force` 才会被覆盖。用户想更新本 skill 时优先给这条命令，而不是让用户手工 `cp` 或 `curl`。
+
 ## 注意
 
 - `--noEmit` 总是传给底层 vue-tsc，无需手动加。不支持响应文件参数（`@file`），请直接传参；转发时会改变编译选项含义的歧义参数组合会被拒绝，需显式提供选项值。

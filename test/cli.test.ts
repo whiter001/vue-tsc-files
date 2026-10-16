@@ -1326,3 +1326,129 @@ function readdirSyncTmpConfigs(root: string) {
 function readdirSyncTmpArtifacts(root: string) {
   return readdirSync(root).filter((f: string) => /^tsconfig\..+\.(json|tsbuildinfo)$/.test(f));
 }
+
+/** 包内随产物一起分发的 skill 源文件；CLI = <repo>/vue-tsc-files，故 dirname 即包根 */
+const BUNDLED_SKILL = join(dirname(CLI), ".agents", "skills", "vue-tsc-files", "SKILL.md");
+
+test("install --skill 装到当前项目 .agents/skills/，重跑识别为最新", () => {
+  const root = createFixture({ "good.ts": "export default 1;\n" });
+  try {
+    const target = join(root, ".agents", "skills", "vue-tsc-files", "SKILL.md");
+
+    const installed = runCli(root, ["install", "--skill"]);
+    assert.equal(installed.status, 0, installed.stderr);
+    assert.match(installed.stdout, /Installed skill to /);
+    assert.equal(readFileSync(target, "utf8"), readFileSync(BUNDLED_SKILL, "utf8"));
+
+    const again = runCli(root, ["install", "--skill"]);
+    assert.equal(again.status, 0, again.stderr);
+    assert.match(again.stdout, /already up to date/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("install --skill 遇到本地改过的 skill 报冲突，--force 覆盖", () => {
+  const root = createFixture({ "good.ts": "export default 1;\n" });
+  try {
+    const target = join(root, ".agents", "skills", "vue-tsc-files", "SKILL.md");
+    assert.equal(runCli(root, ["install", "--skill"]).status, 0);
+    writeFileSync(target, "locally edited\n");
+
+    const conflict = runCli(root, ["install", "--skill"]);
+    assert.equal(conflict.status, 1);
+    assert.match(conflict.stderr, /--force/);
+    assert.equal(readFileSync(target, "utf8"), "locally edited\n");
+
+    assert.equal(runCli(root, ["install", "--skill", "--force"]).status, 0);
+    assert.equal(readFileSync(target, "utf8"), readFileSync(BUNDLED_SKILL, "utf8"));
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("install --skill --user 装到用户主目录 .agents/skills/", () => {
+  const root = mkdtempSync(join(tmpdir(), "vtf-skill-user-"));
+  const home = mkdtempSync(join(tmpdir(), "vtf-skill-home-"));
+  try {
+    const result = spawnSync(process.execPath, [CLI, "install", "--skill", "--user"], {
+      cwd: root,
+      encoding: "utf8",
+      // os.homedir() 在 POSIX 读 $HOME、Windows 读 %USERPROFILE%，两个都指向临时目录
+      env: { ...process.env, HOME: home, USERPROFILE: home },
+    });
+    assert.equal(result.status, 0, result.stderr);
+    assert.ok(
+      existsSync(join(home, ".agents", "skills", "vue-tsc-files", "SKILL.md")),
+      "skill 未落到用户主目录",
+    );
+    assert.equal(existsSync(join(root, ".agents")), false);
+    assert.equal(
+      readFileSync(join(home, ".agents", "skills", "vue-tsc-files", "SKILL.md"), "utf8"),
+      readFileSync(BUNDLED_SKILL, "utf8"),
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("install --skill 无需 tsconfig 与 TypeScript", () => {
+  // 故意建在无 tsconfig.json 的目录，并屏蔽 typescript 加载
+  const root = mkdtempSync(join(tmpdir(), "vtf-skill-nocfg-"));
+  try {
+    writeFileSync(join(root, "block.cjs"), BLOCK_TYPESCRIPT);
+    const result = spawnSync(
+      process.execPath,
+      ["--require", join(root, "block.cjs"), CLI, "install", "--skill"],
+      { cwd: root, encoding: "utf8" },
+    );
+    assert.equal(result.status, 0, result.stdout + result.stderr);
+    assert.doesNotMatch(result.stdout + result.stderr, /TYPESCRIPT_LOAD_BLOCKED/);
+    assert.ok(existsSync(join(root, ".agents", "skills", "vue-tsc-files", "SKILL.md")));
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("install 裸跑与 install --help 的用法输出", () => {
+  const root = createFixture({ "good.ts": "export default 1;\n" });
+  try {
+    const bare = runCli(root, ["install"]);
+    assert.equal(bare.status, 1);
+    assert.match(bare.stderr, /requires --skill/);
+
+    const help = runCli(root, ["install", "--help"]);
+    assert.equal(help.status, 0, help.stderr);
+    assert.match(help.stdout, /vue-tsc-files install --skill/);
+
+    // 打错的参数名最需要合法选项列表，未知参数同样要附用法
+    const unknown = runCli(root, ["install", "--skil"]);
+    assert.equal(unknown.status, 1);
+    assert.match(unknown.stderr, /Unknown option for install: --skil/);
+    assert.match(unknown.stderr, /--force/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("install --skill 目标被普通文件占用时不覆盖，报错退出 1", () => {
+  const root = createFixture({ "good.ts": "export default 1;\n" });
+  try {
+    const target = join(root, ".agents", "skills", "vue-tsc-files");
+    mkdirSync(dirname(target), { recursive: true });
+    writeFileSync(target, "user source file\n");
+
+    for (const args of [
+      ["install", "--skill"],
+      ["install", "--skill", "--force"],
+    ]) {
+      const result = runCli(root, args);
+      assert.equal(result.status, 1, `${args.join(" ")} 不应成功`);
+      assert.match(result.stderr, /not a directory/);
+    }
+    assert.equal(readFileSync(target, "utf8"), "user source file\n");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});

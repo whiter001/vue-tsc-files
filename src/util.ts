@@ -1,9 +1,20 @@
-import { writeFileSync, unlinkSync, existsSync, statSync, readFileSync } from "fs";
+import {
+  writeFileSync,
+  unlinkSync,
+  existsSync,
+  statSync,
+  lstatSync,
+  readFileSync,
+  mkdirSync,
+  cpSync,
+  rmSync,
+} from "fs";
 import { dirname, join, resolve, relative } from "path";
 import { randomBytes } from "crypto";
 import { spawnSync } from "child_process";
+import { homedir } from "os";
 import { createRequire } from "module";
-import { pathToFileURL } from "url";
+import { fileURLToPath, pathToFileURL } from "url";
 import type tsTypes from "typescript";
 import type { TSConfig } from "@json-types/tsconfig";
 
@@ -51,11 +62,36 @@ const UNSTAGED_FLAG = "--unstaged";
 
 const HELP_FLAGS = new Set(["-h", "--help"]);
 
+/** install 子命令名，裸取字面量匹配；该词不带源文件扩展名，不会与文件收集冲突 */
+const INSTALL_COMMAND = "install";
+
+/** 随包分发的 skill 目录名，需与 package.json files 中声明的路径保持一致 */
+const SKILL_NAME = "vue-tsc-files";
+
+const INSTALL_USAGE = `vue-tsc-files install — install the bundled agent skill
+
+Usage:
+  vue-tsc-files install --skill [--user] [--force]
+
+Options:
+  --skill           Install the bundled agent skill (required)
+  --user, --global  Install into the user scope (~/.agents/skills/) instead of
+                    the current project (.agents/skills/)
+  --force           Overwrite an existing skill that differs from the bundled one
+  -h, --help        Show this help
+`;
+
 const HELP_TEXT = `vue-tsc-files — run vue-tsc on specific files without ignoring tsconfig.json
 
 Usage:
   vue-tsc-files [flags] <files...>
   vue-tsc-files [--changed | --staged | --unstaged] [flags]
+  vue-tsc-files install --skill [--user] [--force]
+
+Commands:
+  install --skill             Copy the bundled agent skill into .agents/skills/ of
+                              the current project (--user: ~/.agents/skills/).
+                              An existing skill that differs needs --force.
 
 File collection:
   <files...>                  .vue/.ts/.tsx/.mts/.cts files, resolved against the
@@ -84,6 +120,185 @@ If incremental/composite is effectively enabled, the buildinfo cache is redirect
 to a per-run temporary file — your configured or CLI-passed cache is never touched —
 and removed together with the temporary tsconfig after the check.
 `;
+
+export type InstallRequest =
+  | { action: "help" }
+  | { action: "install"; scope: "project" | "user"; force: boolean }
+  | { action: "error"; message: string };
+
+/**
+ * 解析 install 子命令，不碰进程状态，整个子命令因此可单测。
+ * args[0] 不是 install 时返回 undefined，交回原有的类型检查流程。
+ */
+export function parseInstallArgs(args: string[]): InstallRequest | undefined {
+  if (args[0] !== INSTALL_COMMAND) return undefined;
+
+  let scope: "project" | "user" = "project";
+  let force = false;
+  let skill = false;
+
+  for (const arg of args.slice(1)) {
+    if (HELP_FLAGS.has(arg)) return { action: "help" };
+    if (arg === "--skill") {
+      skill = true;
+      continue;
+    }
+    if (arg === "--user" || arg === "--global") {
+      scope = "user";
+      continue;
+    }
+    if (arg === "--force") {
+      force = true;
+      continue;
+    }
+    return { action: "error", message: `Unknown option for install: ${arg}\n\n${INSTALL_USAGE}` };
+  }
+
+  if (!skill) {
+    return { action: "error", message: `install requires --skill.\n\n${INSTALL_USAGE}` };
+  }
+  return { action: "install", scope, force };
+}
+
+/**
+ * 包内随 npm 分发的 skill 目录。产物是单文件 ESM bundle，import.meta.url
+ * 指向已发布的入口本身，skill 就在它旁边；仓库内直接跑 ./vue-tsc-files 时
+ * 两者同样落在仓库根。
+ */
+export function getBundledSkillDir(): string {
+  return join(dirname(fileURLToPath(import.meta.url)), ".agents", "skills", SKILL_NAME);
+}
+
+/** skill 安装目标：默认项目级，--user 走用户级。cwd/home 可注入，便于单测隔离。 */
+export function getSkillInstallTarget(
+  scope: "project" | "user",
+  cwd: string = process.cwd(),
+  home: string = homedir(),
+): string {
+  return join(scope === "user" ? home : cwd, ".agents", "skills", SKILL_NAME);
+}
+
+export type SkillInstallResult =
+  | { status: "installed"; targetDir: string }
+  | { status: "up-to-date"; targetDir: string }
+  | {
+      status: "conflict";
+      targetDir: string;
+      reason: "differs" | "not-a-directory" | "dangling-symlink";
+    };
+
+function readFileOrUndefined(path: string): string | undefined {
+  try {
+    return readFileSync(path, "utf8");
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * skill 是 Markdown：BOM 与换行风格不算内容改动。否则把装好的 skill 提交进
+ * 自己的仓库、碰上 Windows 的 core.autocrlf 或带 BOM 的编辑器，就会被误判成
+ * 需要 --force 覆盖。
+ */
+function normalizeSkillText(text: string | undefined): string | undefined {
+  return text?.replace(/^\uFEFF/, "").replace(/\r\n/g, "\n");
+}
+
+/**
+ * 把 skill 目录整份复制到位。已有的不同版本绝不隐式覆盖——用户可能本地改过，
+ * 覆盖必须显式 --force。是否相同只看 SKILL.md：skill 目前只带这一个文件；
+ * 若将来新增附属文件，这里必须改成整目录比较，否则老用户会一直被判为最新、
+ * 永远收不到那些新文件。
+ *
+ * 目标一律用 lstat 探测：stat 跟随链接，看不见指向缺失路径的悬空链接，而
+ * fs.cpSync 对那种目标是走 C++ 层 cpSyncCopyDir，出错 try/catch 接不住。
+ * 目标是普通文件时连 --force 也不删：它可能是用户的源文件，风险不对等。
+ */
+export function installSkill(
+  sourceDir: string,
+  targetDir: string,
+  force: boolean,
+): SkillInstallResult {
+  const sourceSkill = normalizeSkillText(readFileOrUndefined(join(sourceDir, "SKILL.md")));
+  if (sourceSkill === undefined) {
+    throw new Error(
+      `Bundled skill not found at ${sourceDir}. Reinstall @whiter001/vue-tsc-files, or fetch ` +
+        "https://raw.githubusercontent.com/whiter001/vue-tsc-files/master/.agents/skills/vue-tsc-files/SKILL.md " +
+        "into .agents/skills/ manually.",
+    );
+  }
+
+  const targetSkill = join(targetDir, "SKILL.md");
+  const linkStat = lstatSync(targetDir, { throwIfNoEntry: false });
+  if (linkStat) {
+    // 悬空链接：lstat 看得见这个目录项，stat 看不见
+    if (linkStat.isSymbolicLink() && !statSync(targetDir, { throwIfNoEntry: false })) {
+      if (!force) return { status: "conflict", targetDir, reason: "dangling-symlink" };
+      // rmSync 作用于符号链接时只摘链接本身，不会递归进它指向的路径
+      rmSync(targetDir, { recursive: true, force: true });
+    } else if (!linkStat.isDirectory() && !linkStat.isSymbolicLink()) {
+      return { status: "conflict", targetDir, reason: "not-a-directory" };
+    } else {
+      // 指向真实目录的链接照常写入，dotfiles 用 symlink 管理 skills 的场景不受影响
+      const installedSkill = normalizeSkillText(readFileOrUndefined(targetSkill));
+      if (installedSkill === sourceSkill) return { status: "up-to-date", targetDir };
+      if (!force) return { status: "conflict", targetDir, reason: "differs" };
+    }
+  }
+
+  // 覆盖前先摘掉 SKILL.md 上的链接，否则 cpSync 会打开它指向的文件写入，
+  // 改到 skill 目录之外去
+  if (lstatSync(targetSkill, { throwIfNoEntry: false })?.isSymbolicLink()) {
+    unlinkSync(targetSkill);
+  }
+  mkdirSync(dirname(targetDir), { recursive: true });
+  cpSync(sourceDir, targetDir, { recursive: true });
+  return { status: "installed", targetDir };
+}
+
+/** install 子命令的输出与退出码收口，只在命中 install 时调用。 */
+export function runInstall(request: InstallRequest): void {
+  if (request.action === "help") {
+    console.log(INSTALL_USAGE);
+    return;
+  }
+  if (request.action === "error") {
+    console.error(request.message);
+    process.exitCode = 1;
+    return;
+  }
+
+  const targetDir = getSkillInstallTarget(request.scope);
+  let result: SkillInstallResult;
+  try {
+    result = installSkill(getBundledSkillDir(), targetDir, request.force);
+  } catch (error) {
+    console.error(error instanceof Error ? error.message : error);
+    process.exitCode = 1;
+    return;
+  }
+
+  switch (result.status) {
+    case "conflict":
+      console.error(
+        result.reason === "not-a-directory"
+          ? `${result.targetDir} exists and is not a directory. Remove it and retry.`
+          : result.reason === "dangling-symlink"
+            ? `${result.targetDir} is a symlink pointing to a missing path. ` +
+              "Re-run with --force to replace the link itself."
+            : `A different skill is already installed at ${result.targetDir}. ` +
+              "Re-run with --force to overwrite it with the bundled one.",
+      );
+      process.exitCode = 1;
+      return;
+    case "up-to-date":
+      console.log(`Skill already up to date at ${result.targetDir}`);
+      return;
+    case "installed":
+      console.log(`Installed skill to ${result.targetDir}`);
+      return;
+  }
+}
 
 export function setupArgs() {
   const args = process.argv.slice(2);

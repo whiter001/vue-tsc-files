@@ -1,6 +1,16 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, realpathSync, rmSync } from "fs";
+import {
+  mkdtempSync,
+  mkdirSync,
+  writeFileSync,
+  readFileSync,
+  existsSync,
+  lstatSync,
+  realpathSync,
+  rmSync,
+  symlinkSync,
+} from "fs";
 import { tmpdir } from "os";
 import { dirname, isAbsolute, join } from "path";
 import { createRequire } from "module";
@@ -14,6 +24,9 @@ import {
   getDiagnosticExitResult,
   stripAnsiCodes,
   parseGitStatusPorcelain,
+  parseInstallArgs,
+  getSkillInstallTarget,
+  installSkill,
 } from "../src/util.ts";
 
 const require = createRequire(import.meta.url);
@@ -641,6 +654,225 @@ test("createAndSetupTsConfig 在有效 incremental/composite 时接管 buildinfo
   } finally {
     process.chdir(prevCwd);
     for (const p of tmpPaths) rmSync(p, { force: true });
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+const SKILL_SOURCE_TEXT = "---\nname: vue-tsc-files\n---\n";
+/** U+FEFF，编辑器加的 BOM */
+const BOM = String.fromCharCode(0xfeff);
+
+/** 建一份假 skill 源目录，除 SKILL.md 外再放一个附属文件，用来验证整目录复制 */
+function createSkillSource(root: string, content = SKILL_SOURCE_TEXT) {
+  const source = join(root, "source", "vue-tsc-files");
+  mkdirSync(source, { recursive: true });
+  writeFileSync(join(source, "SKILL.md"), content);
+  writeFileSync(join(source, "reference.md"), "extra\n");
+  return source;
+}
+
+test("parseInstallArgs 只在 install 子命令上接管，其余走类型检查流程", () => {
+  assert.equal(parseInstallArgs([]), undefined);
+  assert.equal(parseInstallArgs(["a.ts"]), undefined);
+  assert.equal(parseInstallArgs(["--changed"]), undefined);
+  assert.equal(parseInstallArgs(["--staged", "a.ts"]), undefined);
+  assert.equal(parseInstallArgs(["--project", "tsconfig.json"]), undefined);
+});
+
+test("parseInstallArgs 默认项目级，--user/--global 切用户级", () => {
+  assert.deepEqual(parseInstallArgs(["install", "--skill"]), {
+    action: "install",
+    scope: "project",
+    force: false,
+  });
+  for (const flag of ["--user", "--global"]) {
+    assert.deepEqual(parseInstallArgs(["install", "--skill", flag]), {
+      action: "install",
+      scope: "user",
+      force: false,
+    });
+  }
+  assert.deepEqual(parseInstallArgs(["install", "--skill", "--user", "--force"]), {
+    action: "install",
+    scope: "user",
+    force: true,
+  });
+});
+
+test("parseInstallArgs 处理 help、未知参数与缺少 --skill", () => {
+  for (const flag of ["-h", "--help"]) {
+    assert.deepEqual(parseInstallArgs(["install", flag]), { action: "help" });
+  }
+  const unknown = parseInstallArgs(["install", "--skill", "--nope"]);
+  assert.equal(unknown?.action, "error");
+  assert.match(
+    unknown?.action === "error" ? unknown.message : "",
+    /Unknown option for install: --nope/,
+  );
+
+  const bare = parseInstallArgs(["install"]);
+  assert.equal(bare?.action, "error");
+  assert.match(bare?.action === "error" ? bare.message : "", /requires --skill/);
+
+  // 少写了 --skill，作用域选项不足以说明要装什么
+  const noSkill = parseInstallArgs(["install", "--user"]);
+  assert.equal(noSkill?.action, "error");
+});
+
+test("getSkillInstallTarget 按作用域选择项目根或用户主目录", () => {
+  assert.equal(
+    getSkillInstallTarget("project", "/repo", "/home/me"),
+    join("/repo", ".agents", "skills", "vue-tsc-files"),
+  );
+  assert.equal(
+    getSkillInstallTarget("user", "/repo", "/home/me"),
+    join("/home/me", ".agents", "skills", "vue-tsc-files"),
+  );
+});
+
+test("installSkill 全新安装复制整个 skill 目录，重跑识别为最新", () => {
+  const root = mkdtempSync(join(tmpdir(), "vtf-skill-"));
+  try {
+    const source = createSkillSource(root);
+    const target = join(root, "project", ".agents", "skills", "vue-tsc-files");
+
+    const installed = installSkill(source, target, false);
+    assert.deepEqual(installed, { status: "installed", targetDir: target });
+    assert.equal(readFileSync(join(target, "SKILL.md"), "utf8"), SKILL_SOURCE_TEXT);
+    assert.equal(readFileSync(join(target, "reference.md"), "utf8"), "extra\n");
+
+    assert.deepEqual(installSkill(source, target, false), {
+      status: "up-to-date",
+      targetDir: target,
+    });
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("installSkill 对本地改过的 skill 报冲突，--force 才覆盖", () => {
+  const root = mkdtempSync(join(tmpdir(), "vtf-skill-"));
+  try {
+    const source = createSkillSource(root);
+    const target = join(root, "project", ".agents", "skills", "vue-tsc-files");
+    installSkill(source, target, false);
+    writeFileSync(join(target, "SKILL.md"), "locally edited\n");
+
+    assert.deepEqual(installSkill(source, target, false), {
+      status: "conflict",
+      targetDir: target,
+      reason: "differs",
+    });
+    assert.equal(readFileSync(join(target, "SKILL.md"), "utf8"), "locally edited\n");
+
+    assert.equal(installSkill(source, target, true).status, "installed");
+    assert.equal(readFileSync(join(target, "SKILL.md"), "utf8"), SKILL_SOURCE_TEXT);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("installSkill 目标是普通文件时即使 --force 也不覆盖", () => {
+  const root = mkdtempSync(join(tmpdir(), "vtf-skill-"));
+  try {
+    const source = createSkillSource(root);
+    const target = join(root, "project", ".agents", "skills", "vue-tsc-files");
+    mkdirSync(dirname(target), { recursive: true });
+    writeFileSync(target, "user source file\n");
+
+    for (const force of [false, true]) {
+      assert.deepEqual(installSkill(source, target, force), {
+        status: "conflict",
+        targetDir: target,
+        reason: "not-a-directory",
+      });
+    }
+    assert.equal(readFileSync(target, "utf8"), "user source file\n");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("installSkill 源目录缺失时抛出可操作的提示", () => {
+  const root = mkdtempSync(join(tmpdir(), "vtf-skill-"));
+  try {
+    const source = join(root, "missing", "vue-tsc-files");
+    assert.throws(
+      () => installSkill(source, join(root, "target"), true),
+      /Bundled skill not found/,
+    );
+    assert.equal(existsSync(join(root, "target")), false);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("installSkill 把 CRLF 与 BOM 差异视为同一版本", () => {
+  const root = mkdtempSync(join(tmpdir(), "vtf-skill-"));
+  try {
+    const source = createSkillSource(root);
+    const target = join(root, "project", ".agents", "skills", "vue-tsc-files");
+    installSkill(source, target, false);
+
+    // Windows 的 core.autocrlf 或带 BOM 的编辑器改写过的副本，不该被当成需要 --force
+    for (const variant of [SKILL_SOURCE_TEXT.replace(/\n/g, "\r\n"), BOM + SKILL_SOURCE_TEXT]) {
+      writeFileSync(join(target, "SKILL.md"), variant);
+      assert.equal(installSkill(source, target, false).status, "up-to-date");
+    }
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("installSkill 目标是悬空符号链接时 --force 只摘链接本身", () => {
+  const root = mkdtempSync(join(tmpdir(), "vtf-skill-"));
+  // Windows 上创建悬空链接需要特权；无权限就跳过，别让用例变成 CI 随机失败
+  const probe = join(root, "probe-link");
+  try {
+    symlinkSync(join(root, "missing-target"), probe);
+    rmSync(probe, { force: true });
+  } catch {
+    return;
+  }
+
+  try {
+    const source = createSkillSource(root);
+    const target = join(root, "project", ".agents", "skills", "vue-tsc-files");
+    mkdirSync(dirname(target), { recursive: true });
+    symlinkSync(join(root, "missing-target"), target);
+
+    // 悬空链接在 lstat 下现形、stat 下不可见：不能当成"目标不存在"直接拷进去
+    assert.deepEqual(installSkill(source, target, false), {
+      status: "conflict",
+      targetDir: target,
+      reason: "dangling-symlink",
+    });
+
+    assert.equal(installSkill(source, target, true).status, "installed");
+    assert.equal(lstatSync(target).isSymbolicLink(), false);
+    assert.equal(readFileSync(join(target, "SKILL.md"), "utf8"), SKILL_SOURCE_TEXT);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("installSkill 覆盖前摘掉 SKILL.md 上的链接，不写穿到别处", () => {
+  const root = mkdtempSync(join(tmpdir(), "vtf-skill-"));
+  try {
+    const source = createSkillSource(root);
+    const target = join(root, "project", ".agents", "skills", "vue-tsc-files");
+    installSkill(source, target, false);
+
+    const elsewhere = join(root, "elsewhere.md");
+    writeFileSync(elsewhere, "user's own file\n");
+    rmSync(join(target, "SKILL.md"));
+    symlinkSync(elsewhere, join(target, "SKILL.md"));
+
+    assert.equal(installSkill(source, target, false).status, "conflict");
+    assert.equal(installSkill(source, target, true).status, "installed");
+    assert.equal(lstatSync(join(target, "SKILL.md")).isSymbolicLink(), false);
+    assert.equal(readFileSync(elsewhere, "utf8"), "user's own file\n");
+  } finally {
     rmSync(root, { recursive: true, force: true });
   }
 });
