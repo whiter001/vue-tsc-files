@@ -26,6 +26,58 @@ pnpm add -D vue-tsc typescript
 
 我想在 [lint-staged](https://github.com/okonet/lint-staged) 里只对**已暂存的文件**做类型检查。
 
+## 为什么不直接用 `vue-tsc`
+
+`vue-tsc` 检查的是**一个项目**。它受支持的调用方式只有两种：默认的全项目检查，以及用 `-p <tsconfig>` 指向另一个工程——而这两种方式检查的都是整个 program。
+
+**整个 program 很贵。** 每跑一次都要构建全部内容。项目越大越慢，占用的内存随之膨胀，大到一定程度干脆跑不起来。输出同样膨胀：所有历史遗留错误每次都重印一遍。在一个攒了多年类型错误的项目上，这既不快也没法指导行动，还会因为你根本没碰过的文件卡住你的提交：
+
+```sh
+$ vue-tsc --noEmit
+src/legacy2.ts(1,14): error TS2322: Type 'string' is not assignable to type 'number'.
+src/legacy3.ts(1,14): error TS2322: Type 'string' is not assignable to type 'number'.
+src/legacy4.ts(1,14): error TS2322: Type 'string' is not assignable to type 'number'.
+src/legacy5.ts(1,14): error TS2322: Type 'string' is not assignable to type 'number'.
+```
+
+**在命令行里点名文件，同样不是 `vue-tsc` 的用法。** TypeScript 6 会直接拒绝：
+
+```sh
+$ vue-tsc src/a.ts
+error TS5112: tsconfig.json is present but will not be loaded if files are specified on commandline. Use '--ignoreConfig' to skip this error.
+```
+
+而 `-p` 又不能和文件列表混用，所以「只查这几个文件」没有任何一种受支持的写法：
+
+```sh
+$ vue-tsc -p tsconfig.json src/a.ts
+error TS5042: Option 'project' cannot be mixed with source files on a command line.
+```
+
+更早的 TypeScript 版本不拒绝，它们**静默忽略** `tsconfig.json`，用默认选项检查那几行文件——比如在 TypeScript 5.x 上，很多项目那堵与自身代码无关的报错墙就是这么来的：
+
+```sh
+$ vue-tsc src/a.ts
+src/a.ts(1,24): error TS2307: Cannot find module '@/helper' or its corresponding type declarations.
+
+src/View.tsx(1,27): error TS17004: Cannot use JSX unless the '--jsx' flag is provided.
+```
+
+`paths`、`baseUrl`、`jsx`、`lib`、`types`、`experimentalDecorators` 之类统统不生效，而丢掉 `strict` 是反方向的漏报——根本不报。
+
+所以「只检查我改动的文件、并且沿用项目配置」这件事，`vue-tsc` 本来就不提供。这个缺口正是本工具补上的，而且它也不是要替代 `vue-tsc`：它在你原有 tsconfig 旁边生成一份临时配置，把 `files` 设成你指定的文件加上你原配置本就覆盖的声明文件、`include` 设为 `[]`，再把活儿交给真正的 `vue-tsc`。于是检查的代价由你的改动决定，而不是由整个项目决定，而且用的就是你真实的编译选项：
+
+- `--changed`、`--staged`、`--unstaged`，从 git 里挑文件
+- `--errors-in-changed-only`，传递依赖里的报错不会卡住你的提交
+
+上面那个项目，假设你只动了 `src/mine.ts`：
+
+```sh
+$ vue-tsc-files src/mine.ts --errors-in-changed-only
+$ echo $?
+0
+```
+
 ## 用法
 
 配合 lint-staged：

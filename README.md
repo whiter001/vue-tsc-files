@@ -26,6 +26,58 @@ pnpm add -D vue-tsc typescript
 
 I wanted to type-check **only the staged files** with [lint-staged](https://github.com/okonet/lint-staged).
 
+## Why not plain `vue-tsc`
+
+`vue-tsc` checks a project. Its supported invocations are the default whole-project check and `-p <tsconfig>` for pointing at a different one — and in both cases what gets checked is the whole program.
+
+**The whole program is expensive.** Every run builds all of it. That gets slower as the project grows, and the memory it needs grows with it, until on a large enough codebase the check cannot run at all. The output grows too: every pre-existing error is reprinted on every run. On a project that has been accumulating type errors for years, that is neither fast nor actionable, and it blocks your commit for reasons that have nothing to do with you:
+
+```sh
+$ vue-tsc --noEmit
+src/legacy2.ts(1,14): error TS2322: Type 'string' is not assignable to type 'number'.
+src/legacy3.ts(1,14): error TS2322: Type 'string' is not assignable to type 'number'.
+src/legacy4.ts(1,14): error TS2322: Type 'string' is not assignable to type 'number'.
+src/legacy5.ts(1,14): error TS2322: Type 'string' is not assignable to type 'number'.
+```
+
+**Naming files on the command line is not a usage of `vue-tsc` either.** TypeScript 6 refuses it outright:
+
+```sh
+$ vue-tsc src/a.ts
+error TS5112: tsconfig.json is present but will not be loaded if files are specified on commandline. Use '--ignoreConfig' to skip this error.
+```
+
+And `-p` cannot be combined with a file list, so there is no supported spelling for "these files":
+
+```sh
+$ vue-tsc -p tsconfig.json src/a.ts
+error TS5042: Option 'project' cannot be mixed with source files on a command line.
+```
+
+Earlier TypeScript versions did not refuse. They ignored `tsconfig.json` silently and checked the files with default options, which is where projects pick up a wall of errors that have nothing to do with their code — on TypeScript 5.x, for instance:
+
+```sh
+$ vue-tsc src/a.ts
+src/a.ts(1,24): error TS2307: Cannot find module '@/helper' or its corresponding type declarations.
+
+src/View.tsx(1,27): error TS17004: Cannot use JSX unless the '--jsx' flag is provided.
+```
+
+`paths`, `baseUrl`, `jsx`, `lib`, `types`, `experimentalDecorators` and the rest are simply not applied, and a lost `strict` fails in the opposite direction by reporting nothing at all.
+
+So "type-check only the files I changed, under the project configuration" is not something `vue-tsc` offers. That gap is what this tool fills, and it is not a replacement either: it writes a temporary `tsconfig.json` next to yours, with `files` set to the files you asked for plus the declaration files your own configuration already covers and `include` set to `[]`, then hands the work to the real `vue-tsc`. The check costs what your change costs instead of what the project costs, and it runs under your real options:
+
+- `--changed`, `--staged` and `--unstaged` select the files from git
+- `--errors-in-changed-only` keeps errors in transitively imported files from failing your commit
+
+The project above, with `src/mine.ts` the only file you touched:
+
+```sh
+$ vue-tsc-files src/mine.ts --errors-in-changed-only
+$ echo $?
+0
+```
+
 ## Usage
 
 With lint-staged:
