@@ -5,8 +5,12 @@ import {
   mkdirSync,
   writeFileSync,
   readFileSync,
+  readdirSync,
   existsSync,
+  chmodSync,
   lstatSync,
+  statSync,
+  linkSync,
   realpathSync,
   rmSync,
   symlinkSync,
@@ -363,6 +367,34 @@ test("filterErrorsInFiles 兼容含空格及单引号包裹的路径", () => {
   assert.equal(filterErrorsInFiles(quoted, ["src/foo bar.ts"]).errorsInSpecifiedFiles.length, 1);
 });
 
+test("filterErrorsInFiles 保留位置诊断路径的前导空白，不被 trim 成别的文件", () => {
+  // 文件名本身以空格开头：归属时不能去掉前导空白，否则错误会被当成依赖错误豁免
+  assert.equal(
+    filterErrorsInFiles(" bad.ts(1,7): error TS2322: x", [" bad.ts"]).errorsInSpecifiedFiles.length,
+    1,
+  );
+  assert.equal(
+    filterErrorsInFiles("' bad.vue'(3,7): error TS2322: x", [" bad.vue"]).errorsInSpecifiedFiles
+      .length,
+    1,
+  );
+  assert.equal(
+    filterErrorsInFiles(" bad.vue:3:7 - error TS2322: x", [" bad.vue"]).errorsInSpecifiedFiles
+      .length,
+    1,
+  );
+
+  // 前导空白不能反过来把别的文件"认领"进来
+  const other = filterErrorsInFiles(" bad.ts(1,7): error TS2322: x", ["bad.ts"]);
+  assert.deepEqual(other.errorsInSpecifiedFiles, []);
+  assert.deepEqual(other.globalErrors, []);
+});
+
+test("filterErrorsInFiles 无位置的全局错误仍允许前导缩进", () => {
+  const output = "  error TS5083: Cannot read file 'missing.json'.";
+  assert.equal(filterErrorsInFiles(output, ["src/a.ts"]).globalErrors.length, 1);
+});
+
 test("filterErrorsInFiles 收集无文件位置的全局错误", () => {
   const output = "error TS5083: Cannot read file 'tsconfig.json'.";
   const { errorsInSpecifiedFiles, globalErrors } = filterErrorsInFiles(output, ["src/a.ts"]);
@@ -500,10 +532,10 @@ test("createAndSetupTsConfig 按 tsconfig 范围收集 d.ts/.d.mts/.d.cts、尊�
     })!;
     const compilerDts = parsed.fileNames.filter((name) => /\.d\.[cm]?ts$/i.test(name));
     const collectedDts = (config.files as string[]).filter((f: string) => /\.d\.[cm]?ts$/i.test(f));
-    assert.deepEqual(
-      collectedDts.map((f) => f.replace(/\\/g, "/")).sort(),
-      compilerDts.map((f) => f.replace(/\\/g, "/")).sort(),
-    );
+    // TS 解析配置时会 realpath 目录（macOS 上 /var → /private/var），两边同样归一化再比
+    const normalizePaths = (paths: string[]) =>
+      paths.map((f) => realpathSync(f).replace(/\\/g, "/")).sort();
+    assert.deepEqual(normalizePaths(collectedDts), normalizePaths(compilerDts));
   } finally {
     process.chdir(prevCwd);
     if (tmpPath) rmSync(tmpPath, { force: true });
@@ -671,6 +703,23 @@ function createSkillSource(root: string, content = SKILL_SOURCE_TEXT) {
   return source;
 }
 
+/** 建不了符号链接的平台（Windows 缺特权）让对应用例直接跳过，别变成随机失败 */
+function canCreateSymlink(root: string, target: string, type?: "dir") {
+  const probe = join(root, "probe-link");
+  try {
+    symlinkSync(target, probe, type);
+  } catch {
+    return false;
+  }
+  rmSync(probe, { force: true });
+  return true;
+}
+
+/** 安装目录里不该留下暂存目录/临时文件 */
+function hasInstallArtifact(dir: string) {
+  return readdirSync(dir).some((name) => name.startsWith(".vue-tsc-files"));
+}
+
 test("parseInstallArgs 只在 install 子命令上接管，其余走类型检查流程", () => {
   assert.equal(parseInstallArgs([]), undefined);
   assert.equal(parseInstallArgs(["a.ts"]), undefined);
@@ -827,13 +876,7 @@ test("installSkill 把 CRLF 与 BOM 差异视为同一版本", () => {
 test("installSkill 目标是悬空符号链接时 --force 只摘链接本身", () => {
   const root = mkdtempSync(join(tmpdir(), "vtf-skill-"));
   // Windows 上创建悬空链接需要特权；无权限就跳过，别让用例变成 CI 随机失败
-  const probe = join(root, "probe-link");
-  try {
-    symlinkSync(join(root, "missing-target"), probe);
-    rmSync(probe, { force: true });
-  } catch {
-    return;
-  }
+  if (!canCreateSymlink(root, join(root, "missing-target"))) return;
 
   try {
     const source = createSkillSource(root);
@@ -856,7 +899,7 @@ test("installSkill 目标是悬空符号链接时 --force 只摘链接本身", (
   }
 });
 
-test("installSkill 覆盖前摘掉 SKILL.md 上的链接，不写穿到别处", () => {
+test("installSkill 覆盖 SKILL.md 上的链接只换目录项，不写穿到别处", () => {
   const root = mkdtempSync(join(tmpdir(), "vtf-skill-"));
   try {
     const source = createSkillSource(root);
@@ -873,6 +916,328 @@ test("installSkill 覆盖前摘掉 SKILL.md 上的链接，不写穿到别处", 
     assert.equal(lstatSync(join(target, "SKILL.md")).isSymbolicLink(), false);
     assert.equal(readFileSync(elsewhere, "utf8"), "user's own file\n");
   } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("installSkill 目标是目录 symlink 时保留链接，把内容写进真实目录", (t) => {
+  const root = mkdtempSync(join(tmpdir(), "vtf-skill-"));
+  try {
+    const source = createSkillSource(root);
+    // dotfiles 用 symlink 管理 skills：链接本身必须留着
+    const realDir = join(root, "real-skill");
+    const target = join(root, "project", ".agents", "skills", "vue-tsc-files");
+    mkdirSync(dirname(target), { recursive: true });
+    mkdirSync(realDir, { recursive: true });
+    if (!canCreateSymlink(root, realDir, "dir")) return t.skip("本平台建不了目录符号链接");
+    symlinkSync(realDir, target, "dir");
+    writeFileSync(join(realDir, "SKILL.md"), "locally edited\n");
+
+    // 链接指向的目录里装着改过的 skill，仍按"内容不同"处理
+    assert.deepEqual(installSkill(source, target, false), {
+      status: "conflict",
+      targetDir: target,
+      reason: "differs",
+    });
+
+    assert.equal(installSkill(source, target, true).status, "installed");
+    assert.equal(lstatSync(target).isSymbolicLink(), true);
+    assert.equal(realpathSync(target), realpathSync(realDir));
+    assert.equal(readFileSync(join(realDir, "SKILL.md"), "utf8"), SKILL_SOURCE_TEXT);
+    assert.equal(readFileSync(join(realDir, "reference.md"), "utf8"), "extra\n");
+    assert.equal(hasInstallArtifact(realDir), false);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("installSkill 目录 symlink 内的 SKILL.md 是链接时更新不写穿外部文件", (t) => {
+  const root = mkdtempSync(join(tmpdir(), "vtf-skill-"));
+  try {
+    const source = createSkillSource(root);
+    const realDir = join(root, "real-skill");
+    const target = join(root, "project", ".agents", "skills", "vue-tsc-files");
+    mkdirSync(dirname(target), { recursive: true });
+    mkdirSync(realDir, { recursive: true });
+    if (!canCreateSymlink(root, realDir, "dir")) return t.skip("本平台建不了目录符号链接");
+
+    const elsewhere = join(root, "elsewhere.md");
+    writeFileSync(elsewhere, "user's own file\n");
+    symlinkSync(realDir, target, "dir");
+    symlinkSync(elsewhere, join(realDir, "SKILL.md"));
+
+    assert.equal(installSkill(source, target, false).status, "conflict");
+    assert.equal(installSkill(source, target, true).status, "installed");
+
+    // 两层链接都被换成普通目录项，外部文件一个字节都没动
+    assert.equal(lstatSync(target).isSymbolicLink(), true);
+    assert.equal(lstatSync(join(realDir, "SKILL.md")).isSymbolicLink(), false);
+    assert.equal(readFileSync(join(realDir, "SKILL.md"), "utf8"), SKILL_SOURCE_TEXT);
+    assert.equal(readFileSync(elsewhere, "utf8"), "user's own file\n");
+    assert.equal(hasInstallArtifact(realDir), false);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("installSkill 覆盖 hardlink 不改外部文件，新装文件也不再共享 inode", () => {
+  const root = mkdtempSync(join(tmpdir(), "vtf-skill-"));
+  try {
+    const source = createSkillSource(root);
+    const target = join(root, "project", ".agents", "skills", "vue-tsc-files");
+    const elsewhere = join(root, "elsewhere.md");
+    writeFileSync(elsewhere, "shared inode\n");
+    mkdirSync(target, { recursive: true });
+    linkSync(elsewhere, join(target, "SKILL.md"));
+    // 原地写入会改到外部文件，测试前先确认二者确实共享同一个 inode
+    assert.equal(statSync(join(target, "SKILL.md")).ino, statSync(elsewhere).ino);
+
+    assert.equal(installSkill(source, target, false).status, "conflict");
+    assert.equal(installSkill(source, target, true).status, "installed");
+
+    assert.equal(readFileSync(elsewhere, "utf8"), "shared inode\n");
+    assert.equal(readFileSync(join(target, "SKILL.md"), "utf8"), SKILL_SOURCE_TEXT);
+    assert.notEqual(statSync(join(target, "SKILL.md")).ino, statSync(elsewhere).ino);
+    assert.equal(hasInstallArtifact(target), false);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("installSkill 目标 symlink 指向普通文件时 --force 也报 not-a-directory", (t) => {
+  const root = mkdtempSync(join(tmpdir(), "vtf-skill-"));
+  try {
+    const source = createSkillSource(root);
+    const target = join(root, "project", ".agents", "skills", "vue-tsc-files");
+    const elsewhere = join(root, "elsewhere.md");
+    writeFileSync(elsewhere, "user source file\n");
+    mkdirSync(dirname(target), { recursive: true });
+    if (!canCreateSymlink(root, elsewhere)) return t.skip("本平台建不了符号链接");
+    symlinkSync(elsewhere, target);
+
+    // 跟着链接写会把用户的源文件改成 skill 内容，风险不对等，--force 也不行
+    for (const force of [false, true]) {
+      assert.deepEqual(installSkill(source, target, force), {
+        status: "conflict",
+        targetDir: target,
+        reason: "not-a-directory",
+      });
+    }
+    assert.equal(readFileSync(elsewhere, "utf8"), "user source file\n");
+    assert.equal(lstatSync(target).isSymbolicLink(), true);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("installSkill 预检到 SKILL.md 是目录时在动原安装前拒绝", () => {
+  const root = mkdtempSync(join(tmpdir(), "vtf-skill-"));
+  try {
+    const source = createSkillSource(root);
+    const target = join(root, "project", ".agents", "skills", "vue-tsc-files");
+    mkdirSync(join(target, "SKILL.md"), { recursive: true });
+    writeFileSync(join(target, "SKILL.md", "keep.md"), "user's own file\n");
+
+    assert.throws(() => installSkill(source, target, true), /is a directory/);
+    assert.equal(lstatSync(join(target, "SKILL.md")).isDirectory(), true);
+    assert.equal(readFileSync(join(target, "SKILL.md", "keep.md"), "utf8"), "user's own file\n");
+    assert.equal(hasInstallArtifact(target), false);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("installSkill 写入失败时原安装与 SKILL.md 的链接形态原样保留", (t) => {
+  const root = mkdtempSync(join(tmpdir(), "vtf-skill-"));
+  // 靠去掉写权限注入失败：root（如容器）与 Windows 上不成立，跳过而不是假装通过
+  if (process.platform === "win32" || process.getuid?.() === 0) {
+    return t.skip("本平台无法用权限制造写入失败");
+  }
+  try {
+    const source = createSkillSource(root);
+    const target = join(root, "project", ".agents", "skills", "vue-tsc-files");
+    installSkill(source, target, false);
+    writeFileSync(join(target, "SKILL.md"), "locally edited\n");
+
+    chmodSync(target, 0o500);
+    try {
+      assert.throws(() => installSkill(source, target, true));
+      // 复制没成功就不该有任何提升：旧内容原样在，暂存目录也被清掉
+      assert.equal(readFileSync(join(target, "SKILL.md"), "utf8"), "locally edited\n");
+      assert.equal(hasInstallArtifact(target), false);
+    } finally {
+      chmodSync(target, 0o700);
+    }
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("installSkill 更新时保留用户自建文件，附属 payload 照常覆盖", () => {
+  const root = mkdtempSync(join(tmpdir(), "vtf-skill-"));
+  try {
+    const source = createSkillSource(root);
+    const target = join(root, "project", ".agents", "skills", "vue-tsc-files");
+    installSkill(source, target, false);
+    writeFileSync(join(target, "my-notes.md"), "my notes\n");
+    writeFileSync(join(target, "SKILL.md"), "locally edited\n");
+    // 源侧附属文件有新内容时要跟着更新，不能只搬 SKILL.md
+    writeFileSync(join(source, "reference.md"), "extra v2\n");
+
+    assert.equal(installSkill(source, target, true).status, "installed");
+    assert.equal(readFileSync(join(target, "SKILL.md"), "utf8"), SKILL_SOURCE_TEXT);
+    assert.equal(readFileSync(join(target, "reference.md"), "utf8"), "extra v2\n");
+    assert.equal(readFileSync(join(target, "my-notes.md"), "utf8"), "my notes\n");
+    assert.equal(hasInstallArtifact(target), false);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+/** 在随包目录里加一份嵌套 payload，返回源目录 */
+function addNestedPayload(root: string) {
+  const source = createSkillSource(root);
+  mkdirSync(join(source, "nested"), { recursive: true });
+  writeFileSync(join(source, "nested", "file.md"), "nested payload\n");
+  return source;
+}
+
+test("installSkill payload 文件撞上目标目录时安装前拒绝，修正后重跑能装全", () => {
+  const root = mkdtempSync(join(tmpdir(), "vtf-skill-"));
+  try {
+    const source = createSkillSource(root, "new skill\n");
+    const target = join(root, "project", ".agents", "skills", "vue-tsc-files");
+    installSkill(source, target, false);
+    writeFileSync(join(target, "SKILL.md"), "old skill\n");
+    rmSync(join(target, "reference.md"));
+    mkdirSync(join(target, "reference.md"), { recursive: true });
+
+    // 先提升 SKILL.md 再撞上目录的话，旧 SKILL.md 已被覆盖：重跑会被判成"最新"
+    assert.throws(() => installSkill(source, target, true), /is a directory/);
+    assert.equal(readFileSync(join(target, "SKILL.md"), "utf8"), "old skill\n");
+    assert.equal(hasInstallArtifact(target), false);
+
+    rmSync(join(target, "reference.md"), { recursive: true });
+    assert.equal(installSkill(source, target, true).status, "installed");
+    assert.equal(readFileSync(join(target, "SKILL.md"), "utf8"), "new skill\n");
+    assert.equal(readFileSync(join(target, "reference.md"), "utf8"), "extra\n");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("installSkill payload 目录撞上目标文件时安装前拒绝，旧 SKILL.md 不变", () => {
+  const root = mkdtempSync(join(tmpdir(), "vtf-skill-"));
+  try {
+    const source = addNestedPayload(root);
+    const target = join(root, "project", ".agents", "skills", "vue-tsc-files");
+    installSkill(source, target, false);
+    writeFileSync(join(target, "SKILL.md"), "old skill\n");
+    rmSync(join(target, "nested"), { recursive: true });
+    writeFileSync(join(target, "nested"), "not a directory\n");
+
+    assert.throws(() => installSkill(source, target, true), /is not a directory/);
+    assert.equal(readFileSync(join(target, "SKILL.md"), "utf8"), "old skill\n");
+    assert.equal(readFileSync(join(target, "nested"), "utf8"), "not a directory\n");
+    assert.equal(hasInstallArtifact(target), false);
+
+    rmSync(join(target, "nested"));
+    assert.equal(installSkill(source, target, true).status, "installed");
+    assert.equal(readFileSync(join(target, "SKILL.md"), "utf8"), SKILL_SOURCE_TEXT);
+    assert.equal(readFileSync(join(target, "nested", "file.md"), "utf8"), "nested payload\n");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("installSkill 嵌套目标目录是 symlink 时保守拒绝，不写穿到目录外", (t) => {
+  const root = mkdtempSync(join(tmpdir(), "vtf-skill-"));
+  try {
+    const source = addNestedPayload(root);
+    const target = join(root, "project", ".agents", "skills", "vue-tsc-files");
+    const outside = join(root, "outside-dir");
+    installSkill(source, target, false);
+    writeFileSync(join(target, "SKILL.md"), "old skill\n");
+    rmSync(join(target, "nested"), { recursive: true });
+    mkdirSync(outside);
+    writeFileSync(join(outside, "external.md"), "user's own file\n");
+    if (!canCreateSymlink(root, outside, "dir")) return t.skip("本平台建不了目录符号链接");
+    symlinkSync(outside, join(target, "nested"), "dir");
+
+    assert.throws(() => installSkill(source, target, true), /is not a directory/);
+    assert.equal(readFileSync(join(target, "SKILL.md"), "utf8"), "old skill\n");
+    // 外部目录既没被写入 payload，也没被删掉
+    assert.deepEqual(readdirSync(outside), ["external.md"]);
+    assert.equal(lstatSync(join(target, "nested")).isSymbolicLink(), true);
+    assert.equal(hasInstallArtifact(target), false);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("installSkill 嵌套目录里的文件是 symlink 或 hardlink 时外部文件不变", (t) => {
+  const root = mkdtempSync(join(tmpdir(), "vtf-skill-"));
+  try {
+    const source = addNestedPayload(root);
+    const target = join(root, "project", ".agents", "skills", "vue-tsc-files");
+    installSkill(source, target, false);
+    writeFileSync(join(target, "SKILL.md"), "old skill\n");
+    rmSync(join(target, "nested"), { recursive: true });
+    mkdirSync(join(target, "nested"), { recursive: true });
+
+    const linkedBySymlink = join(root, "by-symlink.md");
+    const linkedByHardlink = join(root, "by-hardlink.md");
+    writeFileSync(linkedBySymlink, "symlinked\n");
+    writeFileSync(linkedByHardlink, "hardlinked\n");
+    if (!canCreateSymlink(root, linkedBySymlink)) {
+      return t.skip("本平台建不了符号链接");
+    }
+    symlinkSync(linkedBySymlink, join(target, "nested", "file.md"));
+    // 源侧再加一个 second.md，硬链接那一路才也走原子替换
+    writeFileSync(join(source, "nested", "second.md"), "second payload\n");
+    linkSync(linkedByHardlink, join(target, "nested", "second.md"));
+    assert.equal(statSync(join(target, "nested", "second.md")).ino, statSync(linkedByHardlink).ino);
+
+    assert.equal(installSkill(source, target, true).status, "installed");
+    assert.equal(readFileSync(join(target, "nested", "file.md"), "utf8"), "nested payload\n");
+    assert.equal(readFileSync(join(target, "nested", "second.md"), "utf8"), "second payload\n");
+    assert.equal(readFileSync(linkedBySymlink, "utf8"), "symlinked\n");
+    assert.equal(readFileSync(linkedByHardlink, "utf8"), "hardlinked\n");
+    assert.notEqual(
+      statSync(join(target, "nested", "second.md")).ino,
+      statSync(linkedByHardlink).ino,
+    );
+    assert.equal(hasInstallArtifact(target), false);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("installSkill payload 复制中途失败时旧 SKILL.md 链接与外部文件保持不变", (t) => {
+  const root = mkdtempSync(join(tmpdir(), "vtf-skill-"));
+  if (process.platform === "win32" || process.getuid?.() === 0) {
+    return t.skip("本平台无法用权限制造复制失败");
+  }
+  try {
+    const source = createSkillSource(root);
+    const target = join(root, "project", ".agents", "skills", "vue-tsc-files");
+    const elsewhere = join(root, "elsewhere.md");
+    writeFileSync(elsewhere, "user's own file\n");
+    installSkill(source, target, false);
+    rmSync(join(target, "SKILL.md"));
+    if (!canCreateSymlink(root, elsewhere)) {
+      return t.skip("本平台建不了符号链接");
+    }
+    symlinkSync(elsewhere, join(target, "SKILL.md"));
+    // 附属文件读不出来：整份 payload 复制失败，任何提升都不能发生
+    chmodSync(join(source, "reference.md"), 0o000);
+
+    assert.throws(() => installSkill(source, target, true));
+    assert.equal(lstatSync(join(target, "SKILL.md")).isSymbolicLink(), true);
+    assert.equal(readFileSync(elsewhere, "utf8"), "user's own file\n");
+    assert.equal(hasInstallArtifact(target), false);
+  } finally {
+    chmodSync(join(root, "source", "vue-tsc-files", "reference.md"), 0o600);
     rmSync(root, { recursive: true, force: true });
   }
 });

@@ -442,6 +442,9 @@ test("前置检查：缺少 git 提交身份时在发布前拒绝", (t) => {
   const fx = createFixture(t);
   fx.gitOk(fx.repo, ["config", "--unset", "user.name"]);
   fx.gitOk(fx.repo, ["config", "--unset", "user.email"]);
+  // 显式禁掉系统身份猜测：否则 git 会用 主机名+用户名 兜底，`git var
+  // GIT_COMMITTER_IDENT` 照样成功，用例的"缺身份"前提在部分机器上不成立
+  fx.gitOk(fx.repo, ["config", "user.useConfigOnly", "true"]);
 
   const r = release(fx, ["patch", "--commit", "--yes"]);
   assert.notEqual(r.status, 0);

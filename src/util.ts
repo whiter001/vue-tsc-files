@@ -5,6 +5,9 @@ import {
   statSync,
   lstatSync,
   readFileSync,
+  readdirSync,
+  realpathSync,
+  renameSync,
   mkdirSync,
   cpSync,
   rmSync,
@@ -67,6 +70,9 @@ const INSTALL_COMMAND = "install";
 
 /** 随包分发的 skill 目录名，需与 package.json files 中声明的路径保持一致 */
 const SKILL_NAME = "vue-tsc-files";
+
+/** skill 目录里承载正文的文件，也是"是否已是最新"的唯一判据 */
+const SKILL_FILE = "SKILL.md";
 
 const INSTALL_USAGE = `vue-tsc-files install — install the bundled agent skill
 
@@ -205,21 +211,71 @@ function normalizeSkillText(text: string | undefined): string | undefined {
 }
 
 /**
+ * 同目录临时文件先复制好，再用 rename 换掉目标：只换目录项，symlink 与 hardlink
+ * 指向的外部文件不会被改写，也不会先 unlink 再复制。
+ */
+function replaceFileAtomically(sourceFile: string, targetFile: string): void {
+  const staged = join(dirname(targetFile), `.vue-tsc-files-${randomChars()}.tmp`);
+  try {
+    cpSync(sourceFile, staged);
+    renameSync(staged, targetFile);
+  } finally {
+    rmSync(staged, { force: true });
+  }
+}
+
+/** 随包目录里要提升的一条：目录只用来核对与创建，叶文件才逐个替换。 */
+interface PayloadEntry {
+  relative: string;
+  isDirectory: boolean;
+}
+
+/** 前序遍历暂存目录，父目录一定排在子项之前。 */
+function collectPayloadEntries(dir: string, prefix = ""): PayloadEntry[] {
+  return readdirSync(dir).flatMap((name) => {
+    const relative = join(prefix, name);
+    const absolute = join(dir, name);
+    if (!lstatSync(absolute).isDirectory()) return [{ relative, isDirectory: false }];
+    return [{ relative, isDirectory: true }, ...collectPayloadEntries(absolute, relative)];
+  });
+}
+
+/** payload 与既有安装的类型冲突：任一条不匹配就整体拒绝，不去猜用户的意图。 */
+function assertTargetTypeMatches(writeDir: string, entry: PayloadEntry): void {
+  const destination = join(writeDir, entry.relative);
+  const existing = lstatSync(destination, { throwIfNoEntry: false });
+  if (!existing) return;
+  if (entry.isDirectory) {
+    // 嵌套目录的 symlink 一律保守拒绝：跟进链接等于往 skill 目录之外写
+    if (existing.isSymbolicLink() || !existing.isDirectory()) {
+      throw new Error(`${destination} is not a directory. Remove it and retry.`);
+    }
+  } else if (existing.isDirectory()) {
+    throw new Error(`${destination} is a directory. Remove it and retry.`);
+  }
+}
+
+/**
  * 把 skill 目录整份复制到位。已有的不同版本绝不隐式覆盖——用户可能本地改过，
  * 覆盖必须显式 --force。是否相同只看 SKILL.md：skill 目前只带这一个文件；
  * 若将来新增附属文件，这里必须改成整目录比较，否则老用户会一直被判为最新、
  * 永远收不到那些新文件。
  *
- * 目标一律用 lstat 探测：stat 跟随链接，看不见指向缺失路径的悬空链接，而
- * fs.cpSync 对那种目标是走 C++ 层 cpSyncCopyDir，出错 try/catch 接不住。
- * 目标是普通文件时连 --force 也不删：它可能是用户的源文件，风险不对等。
+ * 目标一律用 lstat 探测：stat 跟随链接，看不见指向缺失路径的悬空链接。目标是
+ * 普通文件或指向普通文件的链接时连 --force 也不动：它可能是用户的源文件。顶层
+ * 目标是目录 symlink 时链接保留（dotfiles 用 symlink 管理 skills 的场景），
+ * 写入解析出来的真实目录。
+ *
+ * 整份 payload 先复制进安装目录内的独占暂存目录，全部目标类型冲突核对通过后才
+ * 逐项原子提升，根 SKILL.md 最后提升——它是"已是最新"的凭据，所以预检拒绝或
+ * 提升中途失败时旧 SKILL.md 仍在，重跑不会被误判成最新。
  */
 export function installSkill(
   sourceDir: string,
   targetDir: string,
   force: boolean,
 ): SkillInstallResult {
-  const sourceSkill = normalizeSkillText(readFileOrUndefined(join(sourceDir, "SKILL.md")));
+  const sourceSkill = normalizeSkillText(readFileOrUndefined(join(sourceDir, SKILL_FILE)));
   if (sourceSkill === undefined) {
     throw new Error(
       `Bundled skill not found at ${sourceDir}. Reinstall @whiter001/vue-tsc-files, or fetch ` +
@@ -228,31 +284,58 @@ export function installSkill(
     );
   }
 
-  const targetSkill = join(targetDir, "SKILL.md");
   const linkStat = lstatSync(targetDir, { throwIfNoEntry: false });
+  // 顶层目标是 symlink 时，链接保留、写入解析后的真实目录
+  let writeDir = targetDir;
   if (linkStat) {
-    // 悬空链接：lstat 看得见这个目录项，stat 看不见
-    if (linkStat.isSymbolicLink() && !statSync(targetDir, { throwIfNoEntry: false })) {
-      if (!force) return { status: "conflict", targetDir, reason: "dangling-symlink" };
-      // rmSync 作用于符号链接时只摘链接本身，不会递归进它指向的路径
-      rmSync(targetDir, { recursive: true, force: true });
-    } else if (!linkStat.isDirectory() && !linkStat.isSymbolicLink()) {
+    if (linkStat.isSymbolicLink()) {
+      // 悬空链接：lstat 看得见这个目录项，stat 看不见
+      const followed = statSync(targetDir, { throwIfNoEntry: false });
+      if (!followed) {
+        if (!force) return { status: "conflict", targetDir, reason: "dangling-symlink" };
+        // rmSync 作用于符号链接时只摘链接本身，不会递归进它指向的路径
+        rmSync(targetDir, { recursive: true, force: true });
+      } else if (!followed.isDirectory()) {
+        return { status: "conflict", targetDir, reason: "not-a-directory" };
+      } else {
+        writeDir = realpathSync(targetDir);
+      }
+    } else if (!linkStat.isDirectory()) {
       return { status: "conflict", targetDir, reason: "not-a-directory" };
-    } else {
-      // 指向真实目录的链接照常写入，dotfiles 用 symlink 管理 skills 的场景不受影响
-      const installedSkill = normalizeSkillText(readFileOrUndefined(targetSkill));
-      if (installedSkill === sourceSkill) return { status: "up-to-date", targetDir };
-      if (!force) return { status: "conflict", targetDir, reason: "differs" };
     }
   }
 
-  // 覆盖前先摘掉 SKILL.md 上的链接，否则 cpSync 会打开它指向的文件写入，
-  // 改到 skill 目录之外去
-  if (lstatSync(targetSkill, { throwIfNoEntry: false })?.isSymbolicLink()) {
-    unlinkSync(targetSkill);
+  const installedSkill = normalizeSkillText(readFileOrUndefined(join(writeDir, SKILL_FILE)));
+  if (installedSkill === sourceSkill) return { status: "up-to-date", targetDir };
+  if (linkStat && !force) return { status: "conflict", targetDir, reason: "differs" };
+
+  mkdirSync(writeDir, { recursive: true });
+  const stagingDir = join(writeDir, `.vue-tsc-files-install-${randomChars()}`);
+  try {
+    mkdirSync(stagingDir);
+    cpSync(sourceDir, stagingDir, { recursive: true });
+    if (normalizeSkillText(readFileOrUndefined(join(stagingDir, SKILL_FILE))) !== sourceSkill) {
+      throw new Error(
+        `Failed to copy the bundled skill from ${sourceDir}; ${writeDir} is unchanged.`,
+      );
+    }
+
+    const entries = collectPayloadEntries(stagingDir);
+    for (const entry of entries) assertTargetTypeMatches(writeDir, entry);
+
+    for (const entry of entries) {
+      if (entry.isDirectory) mkdirSync(join(writeDir, entry.relative), { recursive: true });
+    }
+    // 同名文件覆盖，用户自己多出的文件不在 payload 里，一律保留
+    for (const entry of entries) {
+      if (!entry.isDirectory && entry.relative !== SKILL_FILE) {
+        replaceFileAtomically(join(stagingDir, entry.relative), join(writeDir, entry.relative));
+      }
+    }
+    replaceFileAtomically(join(stagingDir, SKILL_FILE), join(writeDir, SKILL_FILE));
+  } finally {
+    rmSync(stagingDir, { recursive: true, force: true });
   }
-  mkdirSync(dirname(targetDir), { recursive: true });
-  cpSync(sourceDir, targetDir, { recursive: true });
   return { status: "installed", targetDir };
 }
 
@@ -545,6 +628,9 @@ function runGit(args: string[], failureHint: string): string {
 /**
  * Returns the absolute path of the git repository root. 缓存在模块级：
  * --changed/--staged/--unstaged 混用时不必重复 spawn git rev-parse。
+ * 只去掉 git 输出的末尾换行，不能 trim：仓库目录名本身可能带合法首尾空格
+ * （如 "/tmp/my repo /"），trim 后拼回相对路径会指向不存在的目录，
+ * 变更文件会被静默丢弃。
  */
 let cachedRepoRoot: string | undefined;
 function getRepoRoot(): string {
@@ -552,7 +638,7 @@ function getRepoRoot(): string {
     cachedRepoRoot = runGit(
       ["rev-parse", "--show-toplevel"],
       "Failed to locate the git repository root. --changed/--staged/--unstaged must be used inside a git repository",
-    ).trim();
+    ).replace(/\r?\n$/, "");
   }
   return cachedRepoRoot;
 }
@@ -589,10 +675,14 @@ export function getChangedFiles(): string[] {
 function getDiffFiles(cached: boolean): string[] {
   const repoRoot = getRepoRoot();
   // --name-only 只保留重命名的新路径；ACMRT 排除删除和未合并文件。
+  // --no-relative 必须显式给出：diff.relative=true 时 git 在子目录下输出
+  // cwd 相对路径（如 "a.ts" 而非 "sub/a.ts"），按 repoRoot 拼接会命中根目录
+  // 同名文件（误检）或指向不存在的路径（漏检）。
   const diffOutput = runGit(
     [
       "diff",
       ...(cached ? ["--cached"] : []),
+      "--no-relative",
       "--name-only",
       "-z",
       "--diff-filter=ACMRT",
@@ -857,8 +947,10 @@ export function filterErrorsInFiles(
   const globalErrors: string[] = [];
 
   for (const line of output.split(/\r?\n/)) {
-    const trimmed = stripAnsiCodes(line).trim();
-    const located = LOCATED_ERROR_RE.exec(trimmed) ?? PRETTY_LOCATED_ERROR_RE.exec(trimmed);
+    // 带位置的诊断只去尾部空白（含 \r），不能 trimStart：文件名本身可能带前导
+    // 空格（" bad.ts"），一旦被 trim 掉就会归属成"其他文件"而被当依赖错误豁免。
+    const stripped = stripAnsiCodes(line).replace(/\s+$/, "");
+    const located = LOCATED_ERROR_RE.exec(stripped) ?? PRETTY_LOCATED_ERROR_RE.exec(stripped);
     if (located) {
       const filePath = normalizeDiagnosticPath(located[1]!);
       if (targets.has(filePath)) {
@@ -871,7 +963,7 @@ export function filterErrorsInFiles(
       }
       continue;
     }
-    if (GLOBAL_ERROR_RE.test(trimmed)) {
+    if (GLOBAL_ERROR_RE.test(stripped.trimStart())) {
       globalErrors.push(line);
     }
   }

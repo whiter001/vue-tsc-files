@@ -9,6 +9,9 @@ import {
   existsSync,
   rmSync,
   readdirSync,
+  lstatSync,
+  statSync,
+  linkSync,
   realpathSync,
   symlinkSync,
 } from "fs";
@@ -24,14 +27,15 @@ const TSCONFIG = JSON.stringify({
 });
 
 /** 创建独立的临时 fixture 项目（tsconfig + 源文件），避免污染真实仓库 */
-function createFixture(files: Record<string, string>) {
-  const root = mkdtempSync(join(tmpdir(), "vtf-it-"));
-  writeFileSync(join(root, "tsconfig.json"), TSCONFIG);
+function createFixture(files: Record<string, string>, root?: string) {
+  const dir = root ?? mkdtempSync(join(tmpdir(), "vtf-it-"));
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, "tsconfig.json"), TSCONFIG);
   for (const [name, content] of Object.entries(files)) {
-    mkdirSync(dirname(join(root, name)), { recursive: true });
-    writeFileSync(join(root, name), content);
+    mkdirSync(dirname(join(dir, name)), { recursive: true });
+    writeFileSync(join(dir, name), content);
   }
-  return root;
+  return dir;
 }
 
 function runCli(cwd: string, args: string[]) {
@@ -49,12 +53,12 @@ function git(cwd: string, args: string[]) {
 }
 
 /** 创建已提交基线的 git fixture，之后的文件改动即为"变更" */
-function createGitFixture(files: Record<string, string>) {
-  const root = createFixture(files);
-  git(root, ["init", "-q"]);
-  git(root, ["add", "."]);
-  git(root, ["-c", "user.name=test", "-c", "user.email=test@test", "commit", "-qm", "init"]);
-  return root;
+function createGitFixture(files: Record<string, string>, root?: string) {
+  const dir = createFixture(files, root);
+  git(dir, ["init", "-q"]);
+  git(dir, ["add", "."]);
+  git(dir, ["-c", "user.name=test", "-c", "user.email=test@test", "commit", "-qm", "init"]);
+  return dir;
 }
 
 test("类型错误文件退出码非 0 并输出诊断", () => {
@@ -164,6 +168,36 @@ test("--errors-in-changed-only 支持含空格的文件路径", () => {
     // 含空格的指定文件自身错误仍然算数
     const counted = runCli(root, ["--errors-in-changed-only", "src/my dep.ts"]);
     assert.notEqual(counted.status, 0);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("--errors-in-changed-only 下文件名前导空格不被 trim，目标文件自身错误仍失败", () => {
+  const sfc = (body: string) =>
+    `<template><div/></template>\n<script lang="ts">\n${body}</script>\n`;
+  const root = createFixture({
+    " good.ts": 'import a from "./ bad";\nexport default a;\n',
+    " bad.ts": 'const a: number = "x";\nexport default a;\n',
+    " good.vue": sfc('import a from "./ bad";\nexport default a;\n'),
+    " bad.vue": sfc('const a: number = "x";\nexport default a;\n'),
+  });
+  try {
+    // 依赖错误仍按传递依赖豁免
+    for (const good of [" good.ts", " good.vue"]) {
+      const ignored = runCli(root, ["--errors-in-changed-only", good]);
+      assert.equal(ignored.status, 0, ignored.stderr);
+      assert.match(ignored.stdout, /error TS2322/);
+    }
+
+    // 目标文件自身（前导空格文件名）必须失败，不能被当成依赖错误放行
+    const countedTs = runCli(root, ["--errors-in-changed-only", " bad.ts"]);
+    assert.equal(countedTs.status, 2, countedTs.stdout + countedTs.stderr);
+    assert.match(countedTs.stdout, / bad\.ts\(\d+,\d+\): error TS2322/);
+
+    const countedVue = runCli(root, ["--errors-in-changed-only", " bad.vue"]);
+    assert.equal(countedVue.status, 2, countedVue.stdout + countedVue.stderr);
+    assert.match(countedVue.stdout, / bad\.vue\(\d+,\d+\): error TS2322/);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -1099,6 +1133,83 @@ test("--unstaged 无未暂存文件时提示并以 0 退出", () => {
   }
 });
 
+test("diff.relative=true 时子目录 --staged/--unstaged/--changed 只检查子目录的真实目标", () => {
+  // git 在 diff.relative=true 时按 cwd 输出路径（"a.ts" 而非 "sub/a.ts"），
+  // 按仓库根拼接会拿根目录同名文件顶替：sub 的错误被漏掉、根文件的错误被误检。
+  // 两个文件用不同的错误类型，从诊断消息即可分辨被检查的到底是哪一个。
+  const root = createGitFixture({
+    "sub/tsconfig.json": TSCONFIG,
+    "sub/a.ts": "const subValue: number = 1;\nexport default subValue;\n",
+    "a.ts": "const rootValue: Date = new Date();\nexport default rootValue;\n",
+  });
+  const sub = join(root, "sub");
+  const subError = 'const subValue: number = "sub";\nexport default subValue;\n';
+  const rootError = 'const rootValue: Date = "root";\nexport default rootValue;\n';
+  // 子目录里被检查到的必须是 sub/a.ts：路径形如 "a.ts(...)"，而不是根目录的 "../a.ts(...)"
+  const assertSubTarget = (flag: string, result: ReturnType<typeof runCli>) => {
+    assert.equal(result.status, 2, `${flag}: ${result.stdout}${result.stderr}`);
+    assert.match(
+      result.stdout,
+      /a\.ts\(\d+,\d+\): error TS2322: Type 'string' is not assignable to type 'number'\./,
+      `${flag} 未检查到 sub/a.ts：${result.stdout}`,
+    );
+    assert.doesNotMatch(
+      result.stdout,
+      /\.\.\//,
+      `${flag} 误检了仓库根目录的同名文件：${result.stdout}`,
+    );
+  };
+  try {
+    git(root, ["config", "diff.relative", "true"]);
+    // 根目录同名文件也改坏：它不在 sub 的 pathspec 内，绝不能被算作本次目标
+    writeFileSync(join(root, "a.ts"), rootError);
+
+    writeFileSync(join(sub, "a.ts"), subError);
+    assertSubTarget("--changed", runCli(sub, ["--changed"]));
+
+    git(root, ["add", "sub/a.ts"]);
+    assertSubTarget("--staged", runCli(sub, ["--staged"]));
+
+    writeFileSync(join(sub, "a.ts"), subError.replace('"sub"', '"worktree"'));
+    assertSubTarget("--unstaged", runCli(sub, ["--unstaged"]));
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("仓库根目录名带尾随空格时 --changed/--staged/--unstaged 仍能收集变更", () => {
+  // git rev-parse 原样返回带尾随空格的仓库根，CLI 不能把它 trim 掉
+  const parent = mkdtempSync(join(tmpdir(), "vtf-space-"));
+  const root = createGitFixture(
+    {
+      "sub/tsconfig.json": TSCONFIG,
+      "sub/good.ts": "export default 1;\n",
+    },
+    join(parent, "repo "),
+  );
+  const sub = join(root, "sub");
+  try {
+    const errorContent = 'const g: number = "bad";\nexport default g;\n';
+
+    writeFileSync(join(sub, "good.ts"), errorContent);
+    const unstaged = runCli(sub, ["--unstaged"]);
+    assert.equal(unstaged.status, 2, unstaged.stdout + unstaged.stderr);
+    assert.match(unstaged.stdout, /good\.ts\(\d+,\d+\): error TS2322/);
+
+    git(root, ["add", "sub/good.ts"]);
+    const staged = runCli(root, ["--staged"]);
+    assert.equal(staged.status, 2, staged.stdout + staged.stderr);
+    assert.match(staged.stdout, /sub\/good\.ts\(\d+,\d+\): error TS2322/);
+
+    writeFileSync(join(sub, "new.ts"), errorContent);
+    const changed = runCli(root, ["--changed"]);
+    assert.equal(changed.status, 2, changed.stdout + changed.stderr);
+    assert.match(changed.stdout, /sub\/new\.ts\(\d+,\d+\): error TS2322/);
+  } finally {
+    rmSync(parent, { recursive: true, force: true });
+  }
+});
+
 test("优先使用 cwd 项目里的 vue-tsc 而非 bundle 旁的副本", () => {
   const root = createFixture({
     "good.ts": "const a: number = 1;\nexport default a;\n",
@@ -1330,6 +1441,23 @@ function readdirSyncTmpArtifacts(root: string) {
 /** 包内随产物一起分发的 skill 源文件；CLI = <repo>/vue-tsc-files，故 dirname 即包根 */
 const BUNDLED_SKILL = join(dirname(CLI), ".agents", "skills", "vue-tsc-files", "SKILL.md");
 
+/** 建不了符号链接的平台（Windows 缺特权）让对应用例直接跳过，别变成 CI 随机失败 */
+function canCreateSymlink(root: string, target: string, type?: "dir") {
+  const probe = join(root, "probe-link");
+  try {
+    symlinkSync(target, probe, type);
+  } catch {
+    return false;
+  }
+  rmSync(probe, { force: true });
+  return true;
+}
+
+/** skill 安装目录里不该留下暂存目录/临时文件 */
+function hasInstallArtifact(dir: string) {
+  return readdirSync(dir).some((name) => name.startsWith(".vue-tsc-files"));
+}
+
 test("install --skill 装到当前项目 .agents/skills/，重跑识别为最新", () => {
   const root = createFixture({ "good.ts": "export default 1;\n" });
   try {
@@ -1448,6 +1576,83 @@ test("install --skill 目标被普通文件占用时不覆盖，报错退出 1",
       assert.match(result.stderr, /not a directory/);
     }
     assert.equal(readFileSync(target, "utf8"), "user source file\n");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("install --skill 目标目录与内部 SKILL.md 都是 symlink 时 --force 只换内容不拆链接", () => {
+  const root = createFixture({ "good.ts": "export default 1;\n" });
+  try {
+    const realDir = join(root, "real-skill");
+    const target = join(root, ".agents", "skills", "vue-tsc-files");
+    const elsewhere = join(root, "elsewhere.md");
+    mkdirSync(realDir);
+    mkdirSync(dirname(target), { recursive: true });
+    writeFileSync(elsewhere, "user's own file\n");
+    if (!canCreateSymlink(root, realDir, "dir")) return;
+    symlinkSync(realDir, target, "dir");
+    symlinkSync(elsewhere, join(realDir, "SKILL.md"));
+
+    const conflict = runCli(root, ["install", "--skill"]);
+    assert.equal(conflict.status, 1, conflict.stdout + conflict.stderr);
+    assert.match(conflict.stderr, /--force/);
+
+    const forced = runCli(root, ["install", "--skill", "--force"]);
+    assert.equal(forced.status, 0, forced.stderr);
+    assert.match(forced.stdout, /Installed skill to/);
+    // 两层链接都留着，被替换的只有 SKILL.md 这一个目录项
+    assert.equal(lstatSync(target).isSymbolicLink(), true);
+    assert.equal(lstatSync(join(realDir, "SKILL.md")).isSymbolicLink(), false);
+    assert.equal(
+      readFileSync(join(realDir, "SKILL.md"), "utf8"),
+      readFileSync(BUNDLED_SKILL, "utf8"),
+    );
+    assert.equal(readFileSync(elsewhere, "utf8"), "user's own file\n");
+    assert.equal(hasInstallArtifact(realDir), false);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("install --skill 覆盖 hardlink 时外部文件不变，新装文件不共享 inode", () => {
+  const root = createFixture({ "good.ts": "export default 1;\n" });
+  try {
+    const target = join(root, ".agents", "skills", "vue-tsc-files");
+    const elsewhere = join(root, "elsewhere.md");
+    writeFileSync(elsewhere, "shared inode\n");
+    mkdirSync(target, { recursive: true });
+    linkSync(elsewhere, join(target, "SKILL.md"));
+
+    assert.equal(runCli(root, ["install", "--skill"]).status, 1);
+    const forced = runCli(root, ["install", "--skill", "--force"]);
+    assert.equal(forced.status, 0, forced.stderr);
+    // 原地写会把 skill 内容写进外部文件；换目录项后外部文件与 inode 都不受影响
+    assert.equal(readFileSync(elsewhere, "utf8"), "shared inode\n");
+    assert.equal(
+      readFileSync(join(target, "SKILL.md"), "utf8"),
+      readFileSync(BUNDLED_SKILL, "utf8"),
+    );
+    assert.notEqual(statSync(join(target, "SKILL.md")).ino, statSync(elsewhere).ino);
+    assert.equal(hasInstallArtifact(target), false);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("install --skill 目标 SKILL.md 是目录时报错退出 1，原样保留用户内容", () => {
+  const root = createFixture({ "good.ts": "export default 1;\n" });
+  try {
+    const target = join(root, ".agents", "skills", "vue-tsc-files", "SKILL.md");
+    mkdirSync(target, { recursive: true });
+    writeFileSync(join(target, "keep.md"), "user's own file\n");
+
+    // 随包 payload 只有 SKILL.md，这一条走的就是"payload 文件撞上目标目录"的预检
+    const result = runCli(root, ["install", "--skill", "--force"]);
+    assert.equal(result.status, 1, result.stdout + result.stderr);
+    assert.match(result.stderr, /is a directory/);
+    assert.equal(readFileSync(join(target, "keep.md"), "utf8"), "user's own file\n");
+    assert.equal(hasInstallArtifact(join(root, ".agents", "skills", "vue-tsc-files")), false);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

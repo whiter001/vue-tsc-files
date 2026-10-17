@@ -13,6 +13,7 @@ import {
   modesFor,
   parseExtendedDiagnostics,
   removeFixture,
+  runNegativeCanary,
   runNodeBaseline,
   runPrep,
   runOnce,
@@ -402,7 +403,7 @@ async function main(): Promise<void> {
   );
   console.log(
     `共 ${options.scenarios.length} 个场景，主计时轮约 ${timedRuns} 次运行` +
-      `（另有分阶段与内存的补充轮次），请稍候。`,
+      `（另有负向预检、分阶段与内存的补充轮次，都不计时），请稍候。`,
   );
   console.log("");
 
@@ -417,6 +418,21 @@ async function main(): Promise<void> {
 
   for (const scenario of options.scenarios) {
     console.log(`▸ ${scenario.name} — ${scenario.description}`);
+    // 负向预检必须在计时之前：它证明这个场景真的在检查类型，
+    // 它的耗时也不计入任何一格数字
+    const canary = runNegativeCanary(scenario);
+    if (!canary.passed) {
+      console.log("  ⚠ 负向预检未通过，本场景全部数字已丢弃（原因见文末校验失败列表）。");
+      for (const failure of canary.failures) {
+        failures.push({
+          cell: `${scenario.name} / ${failure.mode} / negative-canary`,
+          reason: failure.reason,
+        });
+      }
+      console.log("");
+      continue;
+    }
+    if (scenario.negativeCanary) console.log("  ✓ 负向预检通过：坏属性在三种模式下都被准确拒绝。");
     let prepMs: number | undefined;
     for (const mode of modesFor(scenario)) {
       for (const cacheMode of options.cacheModes) {

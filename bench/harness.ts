@@ -4,6 +4,7 @@ import {
   readFileSync,
   readdirSync,
   rmSync,
+  symlinkSync,
   writeFileSync,
   mkdirSync,
   mkdtempSync,
@@ -13,7 +14,7 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createRequire } from "node:module";
 import { performance } from "node:perf_hooks";
-import type { Scenario } from "./scenarios.ts";
+import type { NegativeCanary, Scenario } from "./scenarios.ts";
 
 const require = createRequire(import.meta.url);
 const BENCH_DIR = dirname(fileURLToPath(import.meta.url));
@@ -28,6 +29,9 @@ export const VUE_TSC_ENTRY = join(
   "bin",
   "vue-tsc.js",
 );
+
+/** 真实 vue 包的目录，fixture 的 node_modules/vue 链到这里，依赖才找得到 @vue/* */
+export const VUE_PACKAGE_DIR = dirname(require.resolve("vue/package.json"));
 
 /** 内存探针，以 --require 预加载进被测进程 */
 const RSS_PROBE = join(BENCH_DIR, "probe.cjs");
@@ -62,19 +66,40 @@ export interface RunResult {
 /** 把 fixture 写到临时目录。git 场景顺带建仓库，否则 --staged 无从谈起。 */
 export function createFixture(scenario: Scenario): string {
   const root = mkdtempSync(join(tmpdir(), `vtf-bench-${scenario.name}-`));
-  for (const [relative, content] of Object.entries(scenario.files)) {
-    const target = join(root, relative);
-    mkdirSync(dirname(target), { recursive: true });
-    writeFileSync(target, content);
-  }
-  writeFileSync(join(root, "tsconfig.json"), JSON.stringify(scenario.tsconfig, null, 2));
-  if (scenario.git) {
-    const git = (...args: string[]) => spawnSync("git", args, { cwd: root, encoding: "utf8" });
-    git("init", "-q");
-    git("add", "-A");
-    git("-c", "user.name=bench", "-c", "user.email=bench@bench", "commit", "-qm", "base");
+  try {
+    for (const [relative, content] of Object.entries(scenario.files)) {
+      const target = join(root, relative);
+      mkdirSync(dirname(target), { recursive: true });
+      writeFileSync(target, content);
+    }
+    writeFileSync(join(root, "tsconfig.json"), JSON.stringify(scenario.tsconfig, null, 2));
+    if (scenario.requiresVue) linkVue(root);
+    if (scenario.git) {
+      const git = (...args: string[]) => spawnSync("git", args, { cwd: root, encoding: "utf8" });
+      git("init", "-q");
+      git("add", "-A");
+      git("-c", "user.name=bench", "-c", "user.email=bench@bench", "commit", "-qm", "base");
+    }
+  } catch (error) {
+    // 半拉子 fixture 留在 tmp 里没人认领，同样是污染；rm 失败就让这个错误顶上来
+    removeFixture(root);
+    throw error;
   }
   return root;
+}
+
+/**
+ * 临时目录里没有 vue，模板里的类型错误会被静默吞掉（实测退出码仍是 0）。
+ * Windows 上普通符号链接要额外权限，用 junction。
+ */
+function linkVue(root: string): void {
+  const modules = join(root, "node_modules");
+  mkdirSync(modules, { recursive: true });
+  symlinkSync(
+    VUE_PACKAGE_DIR,
+    join(modules, "vue"),
+    process.platform === "win32" ? "junction" : "dir",
+  );
 }
 
 export function removeFixture(root: string): void {
@@ -103,6 +128,9 @@ export interface ArgOptions {
   extendedDiagnostics?: boolean;
 }
 
+/** 三种模式都要显式带上：开了 pretty 的彩色诊断行数不出现在 error TSxxxx: 处，计数会静默变 0 */
+const PRETTY = ["--pretty", "false"];
+
 /** 构造某场景某模式的 argv */
 export function buildArgs(
   mode: Mode,
@@ -117,24 +145,15 @@ export function buildArgs(
 
   if (mode === "direct") {
     const control = writeControlConfig(root, scenario);
-    return [
-      VUE_TSC_ENTRY,
-      "-p",
-      control,
-      "--noEmit",
-      ...incremental,
-      ...diagnostics,
-      "--pretty",
-      "false",
-    ];
+    return [VUE_TSC_ENTRY, "-p", control, "--noEmit", ...incremental, ...diagnostics, ...PRETTY];
   }
 
   // 场景自带 wrapperArgs（如 --staged）时，目标文件与过滤器都不适用
-  if (scenario.wrapperArgs) return [...scenario.wrapperArgs];
+  if (scenario.wrapperArgs) return [...scenario.wrapperArgs, ...PRETTY];
 
   const filter = mode === "wrapper-filter" ? ["--errors-in-changed-only"] : [];
   // 目标文件排在转发 flag 之前，与 README 用法一致
-  return [...scenario.targets, ...filter, ...incremental, ...diagnostics];
+  return [...scenario.targets, ...filter, ...incremental, ...diagnostics, ...PRETTY];
 }
 
 /** 运行一次并计时。wall-clock 含进程启动与退出，正是用户感知的那一段 */
@@ -216,6 +235,104 @@ export function validate(
     return fail(`fixture 目录残留临时产物：${leaked.join(", ")}`);
   }
   return undefined;
+}
+
+export interface CanaryFailure {
+  mode: Mode;
+  reason: string;
+}
+
+export interface CanaryOutcome {
+  passed: boolean;
+  failures: CanaryFailure[];
+}
+
+/**
+ * 纯判定，不碰进程也不计时，可以直接喂伪 RunResult 做单测。
+ * 精确到诊断码与落点文件：整个检查崩掉时的输出照样带 error，"有错误"不算通过。
+ */
+export function checkCanaryResult(
+  canary: NegativeCanary,
+  mode: Mode,
+  result: RunResult,
+): string | undefined {
+  const text = `${result.stdout}${result.stderr}`;
+  const lines = text.split(/\r?\n/).filter((line) => /error TS\d+:/.test(line));
+  const cell = `negative-canary / ${mode}`;
+  if (result.exit !== 2) {
+    return `[${cell}] 坏模板应让检查失败，退出码却是 ${result.exit}（多半是模板根本没被检查）\n${trimOutput(result)}`;
+  }
+  if (lines.length !== 1) {
+    return `[${cell}] 诊断 ${lines.length} 条，期望恰好 1 条\n${trimOutput(result)}`;
+  }
+  const line = lines[0] ?? "";
+  if (!/error TS2339:/.test(line)) {
+    return `[${cell}] 诊断码不是 TS2339：${line.trim()}`;
+  }
+  if (!line.includes(canary.diagnosticFile)) {
+    return `[${cell}] 诊断不在 ${canary.diagnosticFile} 上：${line.trim()}`;
+  }
+  return undefined;
+}
+
+function describeError(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+/**
+ * 负向预检：计时之前用一个"必然出错"的模板把每个模式真跑一遍。
+ * 失败即说明这个场景没在做类型检查，它的时间数字没有意义，整场景得跳过。
+ * 用独立的 fixture 目录，跑完直接删，因此既不碰缓存也不进计时数据。
+ * 配置写错（canary 指向不存在的文件、片段对不上）同样按失败算，
+ * 但必须是结构化的失败，不能带着半个 fixture 中止整个基准。
+ */
+export function runNegativeCanary(
+  scenario: Scenario,
+  modes: Mode[] = modesFor(scenario),
+): CanaryOutcome {
+  const canary = scenario.negativeCanary;
+  if (!canary) return { passed: true, failures: [] };
+  const fallback = modes[0] ?? "direct";
+  const failures: CanaryFailure[] = [];
+
+  let root: string;
+  try {
+    root = createFixture(scenario);
+  } catch (error) {
+    return {
+      passed: false,
+      failures: [{ mode: fallback, reason: `fixture 创建失败：${describeError(error)}` }],
+    };
+  }
+
+  try {
+    const file = join(root, canary.file);
+    const original = readFileSync(file, "utf8");
+    if (!original.includes(canary.search)) {
+      failures.push({ mode: fallback, reason: `canary 片段在 fixture 中不存在：${canary.search}` });
+    } else {
+      writeFileSync(file, original.replace(canary.search, canary.replace));
+      for (const mode of modes) {
+        const result = runOnce(fullCommand(mode, buildArgs(mode, root, scenario, "cold")), root);
+        const reason = checkCanaryResult(canary, mode, result);
+        if (reason) failures.push({ mode, reason });
+      }
+    }
+  } catch (error) {
+    failures.push({ mode: fallback, reason: `负向预检自身出错：${describeError(error)}` });
+  } finally {
+    // 目录马上要删，恢复被改写的文件没有意义；删不掉必须记成失败，不能当通过
+    try {
+      removeFixture(root);
+    } catch (error) {
+      failures.push({
+        mode: fallback,
+        reason: `fixture 清理失败（${root}）：${describeError(error)}`,
+      });
+    }
+  }
+
+  return { passed: failures.length === 0, failures };
 }
 
 /**

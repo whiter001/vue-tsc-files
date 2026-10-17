@@ -45,6 +45,22 @@ export interface ScenarioExpectation {
   diagnosticLines?: number;
 }
 
+/**
+ * 计时前的负向 canary：把某个模板改写成"引用一个确定不存在的绑定"，
+ * 检查必须准确报出目标文件的那一条 TS2339。任何偏差都说明这个场景
+ * 根本没在做类型检查——那种情况下"跑得快"是假的。
+ */
+export interface NegativeCanary {
+  /** 被临时改写的 fixture 文件 */
+  file: string;
+  /** 原文中要被替换的片段；找不到就说明 canary 本身失效 */
+  search: string;
+  /** 换成引用不存在绑定的模板 */
+  replace: string;
+  /** 期望唯一那条诊断落在哪个文件上 */
+  diagnosticFile: string;
+}
+
 export interface Scenario {
   name: string;
   description: string;
@@ -60,6 +76,13 @@ export interface Scenario {
   comparable?: boolean;
   /** 是否需要 git 仓库 */
   git?: boolean;
+  /**
+   * fixture 的 node_modules 里需要能解析到真实的 vue 包。缺了它，
+   * 模板里的错误会被静默吞掉（实测退出码仍是 0），场景就测了个寂寞。
+   */
+  requiresVue?: boolean;
+  /** 计时前必须先通过的负向预检，见 NegativeCanary */
+  negativeCanary?: NegativeCanary;
   /** 等价性说明，原样打到输出里 */
   equivalence: string;
   expect: ScenarioExpectation;
@@ -128,7 +151,16 @@ export const SCENARIOS: Scenario[] = [
     },
     tsconfig: { compilerOptions: BASE_COMPILER_OPTIONS, include: ["src"] },
     targets: Array.from({ length: 3 }, (_, i) => `src/Comp${i}.vue`),
-    equivalence: "两模式共用同一份 tsconfig.json，SFC 与其传递依赖构成相同的检查集合",
+    requiresVue: true,
+    negativeCanary: {
+      file: "src/Comp0.vue",
+      search: "{{ count0 }}",
+      replace: "{{ vtfCanaryMissing }}",
+      diagnosticFile: "src/Comp0.vue",
+    },
+    equivalence:
+      "两模式共用同一份 tsconfig.json，SFC 与其传递依赖构成相同的检查集合；" +
+      "fixture 通过 node_modules/vue 链到仓库里的真实 vue 包，模板类型检查才真的开着",
     expect: { exit: 0, diagnosticLines: 0 },
   },
   {
