@@ -6,6 +6,13 @@ on:
   push:
     tags:
       - "v*"
+  # 手动入口只做 dry-run：用于排查 OIDC 交换是否成功，不会上传
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "dry-run（只验证认证与打包，不上传）"
+        type: boolean
+        default: true
 
 permissions:
   contents: read
@@ -25,10 +32,11 @@ jobs:
       # action-setup 直接读取 packageManager 字段中的 pnpm 版本
       - uses: pnpm/action-setup@v4
 
+      # 不设 registry-url：setup-node 会写入 `_authToken=${NODE_AUTH_TOKEN}`，
+      # 空的占位 token 会盖住 OIDC 交换出来的凭据
       - uses: actions/setup-node@v6
         with:
           node-version: "24"
-          registry-url: "https://registry.npmjs.org"
           package-manager-cache: false
 
       # trusted publishing 需要 npm >= 11.5.1；Node 24 自带的版本不保证，锁一下
@@ -38,5 +46,6 @@ jobs:
       - run: pnpm install --frozen-lockfile
 
       # prepublishOnly 跑 check + test（test 的 pretest 会先 build），
-      # 与本地 pnpm publish 的行为一致，这里不重复展开
-      - run: npm publish
+      # 与本地 pnpm publish 的行为一致，这里不重复展开。
+      # verbose 是为了失败时能看到 oidc 交换的原始报错。
+      - run: npm publish --loglevel verbose ${{ inputs.dry_run && '--dry-run' || '' }}
