@@ -1,0 +1,42 @@
+# Trusted publishing (OIDC)：npm 侧只信任这一个 workflow，CI 不需要长期 token。
+# 触发方式与 scripts/release.mjs 的 `git tag v<version>` 对齐。
+name: Publish
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+  id-token: write
+
+# 同一时间只跑一个发布，排队而不是互相取消
+concurrency:
+  group: publish
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      # action-setup 直接读取 packageManager 字段中的 pnpm 版本
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "24"
+          registry-url: "https://registry.npmjs.org"
+          package-manager-cache: false
+
+      # trusted publishing 需要 npm >= 11.5.1；Node 24 自带的版本不保证，锁一下
+      - name: Upgrade npm
+        run: npm install -g npm@latest
+
+      - run: pnpm install --frozen-lockfile
+
+      # prepublishOnly 跑 check + test（test 的 pretest 会先 build），
+      # 与本地 pnpm publish 的行为一致，这里不重复展开
+      - run: npm publish
