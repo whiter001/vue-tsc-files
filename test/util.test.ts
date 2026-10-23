@@ -31,6 +31,8 @@ import {
   parseInstallArgs,
   getSkillInstallTarget,
   installSkill,
+  getPackageVersion,
+  formatVersion,
 } from "../src/util.ts";
 
 const require = createRequire(import.meta.url);
@@ -1240,4 +1242,35 @@ test("installSkill payload 复制中途失败时旧 SKILL.md 链接与外部文�
     chmodSync(join(root, "source", "vue-tsc-files", "reference.md"), 0o600);
     rmSync(root, { recursive: true, force: true });
   }
+});
+
+test("getPackageVersion 读取包名与版本，文件缺失或内容非法时返回 undefined", () => {
+  const root = mkdtempSync(join(tmpdir(), "vtf-version-"));
+  try {
+    const pkg = join(root, "package.json");
+    writeFileSync(pkg, JSON.stringify({ name: "@whiter001/vue-tsc-files", version: "1.2.3" }));
+    assert.deepEqual(getPackageVersion(pkg), {
+      name: "@whiter001/vue-tsc-files",
+      version: "1.2.3",
+    });
+
+    // 字段缺失：不能拼出半个版本号
+    writeFileSync(pkg, JSON.stringify({ name: "@whiter001/vue-tsc-files" }));
+    assert.equal(getPackageVersion(pkg), undefined);
+
+    // 非法 JSON 与文件不存在都不应抛出
+    writeFileSync(pkg, "{ not json");
+    assert.equal(getPackageVersion(pkg), undefined);
+    assert.equal(getPackageVersion(join(root, "missing.json")), undefined);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("formatVersion 同时给出包名与版本，读不到时标注 unknown", () => {
+  assert.equal(
+    formatVersion({ name: "@whiter001/vue-tsc-files", version: "1.2.3" }),
+    "vue-tsc-files 1.2.3 (@whiter001/vue-tsc-files)",
+  );
+  assert.equal(formatVersion(undefined), "vue-tsc-files (unknown version)");
 });

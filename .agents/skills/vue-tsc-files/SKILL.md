@@ -23,14 +23,33 @@ TypeScript 6 在 cwd 存在 tsconfig.json 时会先报 TS5112，要求用 `--ign
 项目已装 devDependency 时（推荐，走项目自己的 vue-tsc/typescript 版本）：
 
 ```bash
-npx vue-tsc-files src/App.vue src/components/Foo.vue
+npx --no-install vue-tsc-files src/App.vue src/components/Foo.vue
 pnpm exec vue-tsc-files src/App.vue
 ```
 
-未安装为 devDependency 时也可免安装直跑（项目里装了 vue-tsc/typescript 时优先用项目版本；未装则由 dlx 自动安装 peer 副本，版本可能与项目预期不同）：
+**`npx` 一定要带 `--no-install`**：本地 `node_modules/.bin` 里找不到该 bin 时，`npx` 会去 registry 安装**同名包** `vue-tsc-files`——那是另一个项目（leglegend/vue-tsc-files，0.0.6），没有 `--errors-in-changed-only` / `--staged` / `--unstaged` / `install --skill`，报错只有 `unknown option` 之类的用法错误，完全不会提示"跑错了包"，归因成本很高。`--no-install` 只允许使用本地已安装版本，缺失时直接失败。
+
+**不要裸敲 `vue-tsc-files`**：会 `command not found`。bin 只在项目的 `node_modules/.bin` 里，不在 shell 的 PATH 上，必须经 `npx` / `pnpm exec` / `npm run` 注入后再执行。lint-staged 配置里可以直接写 `vue-tsc-files`，因为 lint-staged 会把 `node_modules/.bin` 加进 PATH。
+
+未安装为 devDependency 时也可免安装直跑，**必须写完整包名**，避免短名落到另一个同名包上（项目里装了 vue-tsc/typescript 时优先用项目版本；未装则由 dlx 自动安装 peer 副本，版本可能与项目预期不同）：
 
 ```bash
 pnpm dlx @whiter001/vue-tsc-files src/App.vue
+```
+
+不确定当前生效的是哪个包、哪个版本时，先查版本：
+
+```bash
+npx --no-install vue-tsc-files --version
+# vue-tsc-files 1.3.5 (@whiter001/vue-tsc-files)
+```
+
+查版本**不要用 `npm exec`**：npm 12 的 `npm exec` 会把 `--version` / `--help` 当成自己的参数（`npm exec -- node --version` 打印的是 npm 的版本号），要用 `npx --no-install` 或 `pnpm exec`。
+
+若 `--version` 显示的不是 `@whiter001/vue-tsc-files`（本地同时装了同名的 `vue-tsc-files` 时会发生），改用带 scope 的完整包名，指向不会错：
+
+```bash
+npx --no-install @whiter001/vue-tsc-files src/App.vue
 ```
 
 ## 常用参数
@@ -43,6 +62,7 @@ pnpm dlx @whiter001/vue-tsc-files src/App.vue
 | `--changed`                | 从 Git 收集改动文件（含 staged + unstaged + untracked），可省略命令行文件列表                 |
 | `--staged`                 | 按暂存区变更收集文件，实际检查磁盘上的当前内容                                                |
 | `--unstaged`               | 只收集工作区与 index 有差异的 tracked 文件（不含 untracked）                                  |
+| `--version`                | 打印当前生效的包名与版本后退出，不做类型检查                                                  |
 
 `--errors-in-changed-only` 只按诊断的文件归属过滤，不比较 Git 基线或修改行：
 未指定文件中的新错误也可能被豁免，指定文件中的旧错误仍会阻断。

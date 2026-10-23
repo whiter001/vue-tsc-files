@@ -65,6 +65,9 @@ const UNSTAGED_FLAG = "--unstaged";
 
 const HELP_FLAGS = new Set(["-h", "--help"]);
 
+/** 版本查询开关：只打印版本，不触发类型检查 */
+const VERSION_FLAG = "--version";
+
 /** install 子命令名，裸取字面量匹配；该词不带源文件扩展名，不会与文件收集冲突 */
 const INSTALL_COMMAND = "install";
 
@@ -117,6 +120,7 @@ Flags:
                               transitively compiled files are printed but ignored
   --changed-only              Alias for --errors-in-changed-only
   -h, --help                  Show this help
+  --version                   Show the version of this package
 
 File arguments and the collection flags can be mixed; the union is checked.
 --noEmit is always passed to vue-tsc; other compiler flags are forwarded.
@@ -173,6 +177,31 @@ export function parseInstallArgs(args: string[]): InstallRequest | undefined {
  */
 export function getBundledSkillDir(): string {
   return join(dirname(fileURLToPath(import.meta.url)), ".agents", "skills", SKILL_NAME);
+}
+
+/**
+ * 运行时读取本包的 package.json 来报告版本，而不是把版本写死在产物里：
+ * 使用者要确认的是"当前生效的到底是哪个包、哪个版本"，写死的常量会与发布
+ * 版本脱节。package.json 始终随 npm 包分发，入口文件同级即可读到；产物是
+ * 单文件 bundle，import.meta.url 指向入口本身，因此同级的就是包根。
+ */
+export function getPackageVersion(
+  packageJsonPath: string = join(dirname(fileURLToPath(import.meta.url)), "package.json"),
+): { name: string; version: string } | undefined {
+  const text = readFileOrUndefined(packageJsonPath);
+  if (text === undefined) return undefined;
+  try {
+    const parsed = JSON.parse(text) as { name?: unknown; version?: unknown };
+    if (typeof parsed.name !== "string" || typeof parsed.version !== "string") return undefined;
+    return { name: parsed.name, version: parsed.version };
+  } catch {
+    return undefined;
+  }
+}
+
+/** --version 的输出：包名与版本一起打印，跑到同名的另一个包时一眼可辨 */
+export function formatVersion(info: { name: string; version: string } | undefined): string {
+  return info ? `vue-tsc-files ${info.version} (${info.name})` : "vue-tsc-files (unknown version)";
 }
 
 /** skill 安装目标：默认项目级，--user 走用户级。cwd/home 可注入，便于单测隔离。 */
@@ -399,6 +428,10 @@ export function setupArgs() {
     const arg = args[i]!;
     if (HELP_FLAGS.has(arg)) {
       console.log(HELP_TEXT);
+      process.exit(0);
+    }
+    if (arg === VERSION_FLAG) {
+      console.log(formatVersion(getPackageVersion()));
       process.exit(0);
     }
     const lower = arg.toLowerCase();

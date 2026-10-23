@@ -689,6 +689,37 @@ test("--help 与 -h 打印用法并以 0 退出（无需 tsconfig）", () => {
   }
 });
 
+test("--version 打印包名与版本并以 0 退出（无需 tsconfig）", () => {
+  // 故意使用没有 tsconfig 的目录，验证 version 在读取配置之前生效
+  const root = mkdtempSync(join(tmpdir(), "vtf-version-"));
+  try {
+    const result = runCli(root, ["--version"]);
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stdout, /^vue-tsc-files \d+\.\d+\.\d+ \(@whiter001\/vue-tsc-files\)$/m);
+    // 版本必须与仓库 package.json 一致，不能是写死的旧值
+    const pkg = JSON.parse(readFileSync(join(dirname(CLI), "package.json"), "utf8")) as {
+      version: string;
+    };
+    assert.match(result.stdout, new RegExp(`vue-tsc-files ${pkg.version.replace(/\./g, "\\.")}`));
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("--version 与文件参数同时给出时只打印版本，不做类型检查", () => {
+  const root = createFixture({
+    "bad.ts": 'const a: number = "x";\nexport default a;\n',
+  });
+  try {
+    const result = runCli(root, ["--version", "bad.ts"]);
+    assert.equal(result.status, 0, result.stdout + result.stderr);
+    assert.match(result.stdout, /^vue-tsc-files /);
+    assert.doesNotMatch(result.stdout + result.stderr, /error TS2322/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("检查结束后临时 tsconfig 文件被清理", () => {
   const root = createFixture({
     "good.ts": "const a: number = 1;\nexport default a;\n",
@@ -1177,7 +1208,10 @@ test("diff.relative=true 时子目录 --staged/--unstaged/--changed 只检查子
   }
 });
 
-test("仓库根目录名带尾随空格时 --changed/--staged/--unstaged 仍能收集变更", () => {
+test("仓库根目录名带尾随空格时 --changed/--staged/--unstaged 仍能收集变更", (t) => {
+  // Windows 会剥掉路径分量末尾的空格，仓库根目录名不可能以空格结尾；
+  // spawnSync 在这种 cwd 上直接 ENOENT，该场景在 Windows 无法复现
+  if (process.platform === "win32") return t.skip("Windows 无法创建以空格结尾的目录名");
   // git rev-parse 原样返回带尾随空格的仓库根，CLI 不能把它 trim 掉
   const parent = mkdtempSync(join(tmpdir(), "vtf-space-"));
   const root = createGitFixture(
@@ -1336,7 +1370,7 @@ Module._load = function(request, ...args) {
 };
 `;
 
-for (const flag of ["-h", "--help", "--changed", "--staged", "--unstaged"]) {
+for (const flag of ["-h", "--help", "--version", "--changed", "--staged", "--unstaged"]) {
   test(`${flag} 早退出不请求 TypeScript（包括 bundle 回退）`, () => {
     const root = createGitFixture({ "block.cjs": BLOCK_TYPESCRIPT });
     try {
@@ -1352,7 +1386,11 @@ for (const flag of ["-h", "--help", "--changed", "--staged", "--unstaged"]) {
       assert.doesNotMatch(result.stdout + result.stderr, /TYPESCRIPT_LOAD_BLOCKED/);
       assert.match(
         result.stdout,
-        flag.endsWith("h") || flag === "--help" ? /Usage:/ : /No .* files/,
+        flag === "--version"
+          ? /^vue-tsc-files \d+\.\d+\.\d+ \(@whiter001\/vue-tsc-files\)$/m
+          : flag.endsWith("h") || flag === "--help"
+            ? /Usage:/
+            : /No .* files/,
       );
     } finally {
       rmSync(root, { recursive: true, force: true });

@@ -22,6 +22,41 @@ pnpm add -D @whiter001/vue-tsc-files
 pnpm add -D vue-tsc typescript
 ```
 
+## 调用方式
+
+bin 在项目的 `node_modules/.bin` 里，不在 shell 的 PATH 上。直接敲 `vue-tsc-files` 会 `command not found`——要经包运行器执行：
+
+```sh
+npx --no-install vue-tsc-files src/App.vue   # npm
+pnpm exec vue-tsc-files src/App.vue           # pnpm
+npm run type-check -- src/App.vue             # 走 npm script
+```
+
+**`npx` 一定要带 `--no-install`**：不带时，本地找不到 bin 就会去 registry 安装**同名的另一个包**——npm 上的 `vue-tsc-files` 是另一个项目（[leglegend/vue-tsc-files](https://github.com/leglegend/vue-tsc-files)，0.0.6），不支持本工具的任何开关，报错只有 `unknown option` 之类的用法错误，完全不会提示"跑错了包"。`--no-install` 只允许使用本地已安装版本，缺失时直接失败。
+
+完全没装本包时，请写完整包名，避免短名落到另一个同名包上：
+
+```sh
+pnpm dlx @whiter001/vue-tsc-files src/App.vue
+```
+
+`lint-staged` 是例外：它会把 `node_modules/.bin` 加进 PATH，因此配置里直接写 `vue-tsc-files` 即可。
+
+确认当前生效的是哪个包、哪个版本：
+
+```sh
+npx --no-install vue-tsc-files --version
+# vue-tsc-files 1.3.5 (@whiter001/vue-tsc-files)
+```
+
+查版本**不要用 `npm exec`**：npm 12 会把 `--version` / `--help` 当成自己的参数，即使放在 `--` 之后也一样（`npm exec -- node --version` 打印的是 npm 的版本号），工具自己的版本与帮助只能通过 `npx --no-install` 或 `pnpm exec` 拿到。
+
+若 `--version` 显示的不是 `@whiter001/vue-tsc-files`（本地同时装了同名的 `vue-tsc-files` 时会发生），改用带 scope 的完整包名，它不会解析到另一个项目：
+
+```sh
+npx --no-install @whiter001/vue-tsc-files src/App.vue
+```
+
 ## 为什么要用
 
 我想在 [lint-staged](https://github.com/okonet/lint-staged) 里只对**已暂存的文件**做类型检查。
@@ -73,7 +108,7 @@ src/View.tsx(1,27): error TS17004: Cannot use JSX unless the '--jsx' flag is pro
 上面那个项目，假设你只动了 `src/mine.ts`：
 
 ```sh
-$ vue-tsc-files src/mine.ts --errors-in-changed-only
+$ npx --no-install vue-tsc-files src/mine.ts --errors-in-changed-only
 $ echo $?
 0
 ```
@@ -115,9 +150,9 @@ npm 与 pnpm 都已支持。CLI 通过 `require.resolve` 定位已安装的 `vue
 用 `-p` / `--project` 指定根目录 `tsconfig.json` 之外的配置——适合 monorepo 里的 `tsconfig.app.json` / `tsconfig.node.json` 等场景。路径也可以是目录，此时读取其中的 `tsconfig.json`（与 `tsc -p .` 一致）：
 
 ```sh
-vue-tsc-files -p tsconfig.app.json src/App.vue
-vue-tsc-files --project=configs/tsconfig.app.json src/App.vue
-vue-tsc-files -p . src/App.vue
+npx --no-install vue-tsc-files -p tsconfig.app.json src/App.vue
+npx --no-install vue-tsc-files --project=configs/tsconfig.app.json src/App.vue
+npx --no-install vue-tsc-files -p . src/App.vue
 ```
 
 临时 tsconfig 会创建在你指定的配置旁边，因此相对的 `extends`、`baseUrl`、`paths` 解析结果与原配置完全一致。
@@ -127,13 +162,13 @@ vue-tsc-files -p . src/App.vue
 传入 `--changed` 可以让工具从 git 工作区自动收集文件列表，代替命令行传入。它遵循 `git status` 的语义：已修改、已新增、已重命名、已复制、未合并和未跟踪的 `.vue`/`.ts`/`.tsx`/`.mts`/`.cts` 文件都会被检查；已删除的文件被跳过。同时包含已暂存（index）和未暂存（worktree）两类变更。可以与 `--errors-in-changed-only` 组合：
 
 ```sh
-vue-tsc-files --changed --errors-in-changed-only
+npx --no-install vue-tsc-files --changed --errors-in-changed-only
 ```
 
 传入 `--staged` 则只检查下次提交将要带入的内容（git index），即经典的 pre-commit 语义，不需要 lint-staged：
 
 ```sh
-vue-tsc-files --staged --errors-in-changed-only
+npx --no-install vue-tsc-files --staged --errors-in-changed-only
 ```
 
 注意 `--staged` 是按 index 选出文件，但实际检查的是这些文件**当前在磁盘上的内容**。如果对一个文件执行 `git add` 之后继续修改但没有再 `git add`，那些未暂存的修改也会被一并检查（这是 lint-staged 在没有 stash 时的同款限制）。
@@ -141,7 +176,7 @@ vue-tsc-files --staged --errors-in-changed-only
 传入 `--unstaged` 只检查 worktree 与 index 不一致的那些已跟踪文件（`git diff` 语义）。未跟踪文件不属于 git 的"未暂存"概念——需要包含它们请用 `--changed`：
 
 ```sh
-vue-tsc-files --unstaged --errors-in-changed-only
+npx --no-install vue-tsc-files --unstaged --errors-in-changed-only
 ```
 
 命令行显式传入的文件、`--changed`、`--staged`、`--unstaged` 可以混用，结果取并集。显式传入的文件路径相对于当前工作目录解析（也支持绝对路径）；git 收集出的路径会被转成相对于工作目录的路径。在仓库的子目录下运行时，只收集该子目录下的变更。

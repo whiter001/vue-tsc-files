@@ -22,6 +22,41 @@ pnpm add -D @whiter001/vue-tsc-files
 pnpm add -D vue-tsc typescript
 ```
 
+## Running the CLI
+
+The binary lives in the project's `node_modules/.bin`, which is not on your shell's `PATH`. Typing `vue-tsc-files` on its own therefore fails with `command not found` — run it through a package runner instead:
+
+```sh
+npx --no-install vue-tsc-files src/App.vue   # npm
+pnpm exec vue-tsc-files src/App.vue           # pnpm
+npm run type-check -- src/App.vue             # via an npm script
+```
+
+**Always keep `--no-install` on `npx`.** Without it, `npx` falls back to installing a _same-named package from the registry_ when the local binary is missing: `vue-tsc-files` on npm is a different project ([leglegend/vue-tsc-files](https://github.com/leglegend/vue-tsc-files), 0.0.6) that supports none of this tool's flags, and its `unknown option` error never says that the wrong package ran. `--no-install` restricts `npx` to the version installed in the project and fails outright when it is missing.
+
+If the package is not installed at all, use the full package name so the short name cannot resolve to the other project:
+
+```sh
+pnpm dlx @whiter001/vue-tsc-files src/App.vue
+```
+
+`lint-staged` is the exception: it adds `node_modules/.bin` to `PATH`, so the plain `vue-tsc-files` command works in its configuration.
+
+To confirm which package and version is actually in effect:
+
+```sh
+npx --no-install vue-tsc-files --version
+# vue-tsc-files 1.3.5 (@whiter001/vue-tsc-files)
+```
+
+Do not use `npm exec` for this: npm 12 treats `--version` and `--help` as its own flags even after `--` (`npm exec -- node --version` prints npm's version, not Node's), so the tool's own version and help are only reachable through `npx --no-install` or `pnpm exec`.
+
+If `--version` reports anything other than `@whiter001/vue-tsc-files` — which happens when the same-named `vue-tsc-files` is installed alongside it — use the scoped package name, which cannot resolve to the other project:
+
+```sh
+npx --no-install @whiter001/vue-tsc-files src/App.vue
+```
+
 ## Why
 
 I wanted to type-check **only the staged files** with [lint-staged](https://github.com/okonet/lint-staged).
@@ -73,7 +108,7 @@ So "type-check only the files I changed, under the project configuration" is not
 The project above, with `src/mine.ts` the only file you touched:
 
 ```sh
-$ vue-tsc-files src/mine.ts --errors-in-changed-only
+$ npx --no-install vue-tsc-files src/mine.ts --errors-in-changed-only
 $ echo $?
 0
 ```
@@ -115,9 +150,9 @@ Filtering is file-based, not a comparison against a Git baseline or changed line
 Pass `-p` / `--project` to use a tsconfig other than the root `tsconfig.json` — useful in monorepos with e.g. `tsconfig.app.json` / `tsconfig.node.json`. The path may also be a directory, which resolves to the `tsconfig.json` inside it (like `tsc -p .`):
 
 ```sh
-vue-tsc-files -p tsconfig.app.json src/App.vue
-vue-tsc-files --project=configs/tsconfig.app.json src/App.vue
-vue-tsc-files -p . src/App.vue
+npx --no-install vue-tsc-files -p tsconfig.app.json src/App.vue
+npx --no-install vue-tsc-files --project=configs/tsconfig.app.json src/App.vue
+npx --no-install vue-tsc-files -p . src/App.vue
 ```
 
 The temporary tsconfig is created next to the one you specify, so relative `extends`, `baseUrl` and `paths` resolve exactly as they do for your own config.
@@ -127,19 +162,19 @@ The temporary tsconfig is created next to the one you specify, so relative `exte
 Pass `--changed` to collect the file list from git instead of the command line. It uses `git status` semantics — modified, added, renamed, copied, unmerged and untracked `.vue`/`.ts`/`.tsx`/`.mts`/`.cts` files in the working tree are checked; deleted files are skipped. Both staged (index) and unstaged (worktree) changes are included. It can be combined with `--errors-in-changed-only`:
 
 ```sh
-vue-tsc-files --changed --errors-in-changed-only
+npx --no-install vue-tsc-files --changed --errors-in-changed-only
 ```
 
 Pass `--staged` to check only what the next commit would contain (the git index) — the classic pre-commit semantic, without needing lint-staged. **Note: `--staged` selects files by the index but type-checks their current on-disk content.** If you stage a file and then keep editing it without `git add`, the unstaged edits are checked too (the same limitation lint-staged has without its stash feature):
 
 ```sh
-vue-tsc-files --staged --errors-in-changed-only
+npx --no-install vue-tsc-files --staged --errors-in-changed-only
 ```
 
 Pass `--unstaged` to check only tracked files whose worktree content differs from the index (`git diff` semantic). Untracked files are not part of git's "unstaged" concept — use `--changed` to include them:
 
 ```sh
-vue-tsc-files --unstaged --errors-in-changed-only
+npx --no-install vue-tsc-files --unstaged --errors-in-changed-only
 ```
 
 Explicitly passed files, `--changed`, `--staged` and `--unstaged` can be mixed (the union is checked). Note that `--changed` already includes staged changes, so combining it with `--staged` is redundant; `--changed --unstaged` is redundant for the same reason. Explicit file paths are resolved against the current working directory (absolute paths also work); git-collected paths are made relative to the working directory. When run from a repository subdirectory, only changes under that directory are collected.
