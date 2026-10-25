@@ -125,6 +125,20 @@ With lint-staged:
 }
 ```
 
+## Checking a directory
+
+Pass a directory instead of a file list and every `.vue`/`.ts`/`.tsx`/`.mts`/`.cts` file under it is checked:
+
+```sh
+npx --no-install vue-tsc-files src
+```
+
+The directory is expanded recursively, and the expanded files are treated exactly like explicitly passed ones: they are not filtered by your `include`/`exclude`, and with `--errors-in-changed-only` their errors count while errors in transitively imported files stay exempt. Directory expansion skips paths inside `node_modules`, including directly passed directories and directory symlinks pointing there. This does not prevent checking an explicitly passed file or a transitively imported dependency.
+
+Directories, files and the Git collection flags can be mixed. Existing directories are expanded even when their names end in a source-file extension such as `.ts`. An unreadable directory aborts the check with exit code 1 and reports the failing path; a partial scan is never treated as success. Empty or skipped directories are reported as warnings when other files remain, or as a usage error when no files remain and no Git collection flag was passed.
+
+Missing paths without a supported source-file extension, unsupported file types and glob patterns are usage errors. Missing paths with a supported source-file extension are still passed to `vue-tsc` for its file-not-found diagnostic. Glob patterns are not expanded, so let your shell expand them or pass the directory.
+
 ## pnpm support
 
 Works with npm and pnpm. The CLI locates the installed `vue-tsc` package via `require.resolve` and executes its JS entry with the current Node binary, so pnpm's symlinked `node_modules` layout is fully supported.
@@ -133,9 +147,9 @@ A failed type check (or a failed spawn) always exits with a non-zero code. When 
 
 ## Only fail on errors in the specified files
 
-`vue-tsc` compiles the specified files together with everything they transitively import. Pass `--errors-in-changed-only` (alias: `--changed-only`) to ignore errors in non-target source files: the full output is still printed, but only errors in explicitly passed or Git-collected files affect the diagnostic exit code. Configuration errors and abnormal child-process termination always fail.
+`vue-tsc` compiles the specified files together with everything they transitively import. Pass `--errors-in-changed-only` (alias: `--changed-only`) to ignore errors in non-target source files: the full output is still printed, but only errors in explicitly passed, directory-expanded or Git-collected files affect the diagnostic exit code. Configuration errors and abnormal child-process termination always fail.
 
-Filtering is file-based, not a comparison against a Git baseline or changed lines. Existing errors in target files still fail; newly introduced errors in non-target dependencies may be ignored. Automatically collected declaration files are not targets unless explicitly passed or collected by Git.
+Filtering is file-based, not a comparison against a Git baseline or changed lines. Existing errors in target files still fail; newly introduced errors in non-target dependencies may be ignored. Automatically collected declaration files are not targets unless explicitly passed, found by directory expansion or collected by Git.
 
 ```json
 {

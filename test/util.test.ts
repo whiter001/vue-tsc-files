@@ -16,7 +16,7 @@ import {
   symlinkSync,
 } from "fs";
 import { tmpdir } from "os";
-import { dirname, isAbsolute, join } from "path";
+import { dirname, isAbsolute, join, relative } from "path";
 import { createRequire } from "module";
 import {
   getTscFiles,
@@ -33,6 +33,8 @@ import {
   installSkill,
   getPackageVersion,
   formatVersion,
+  expandDirectory,
+  resolveSourceArg,
 } from "../src/util.ts";
 
 const require = createRequire(import.meta.url);
@@ -264,6 +266,323 @@ test("setupArgs 显式文件按首次出现顺序去重，files 与 specifiedFil
   });
 });
 
+test("expandDirectory 递归收集受支持源文件，跳过 node_modules 与无关扩展名", () => {
+  const root = mkdtempSync(join(tmpdir(), "vtf-expand-"));
+  try {
+    mkdirSync(join(root, "src", "nested"), { recursive: true });
+    mkdirSync(join(root, "src", "node_modules", "pkg"), { recursive: true });
+    writeFileSync(join(root, "src", "a.ts"), "");
+    writeFileSync(join(root, "src", "nested", "b.vue"), "");
+    writeFileSync(join(root, "src", "nested", "c.mts"), "");
+    writeFileSync(join(root, "src", "nested", "d.cts"), "");
+    writeFileSync(join(root, "src", "nested", "e.tsx"), "");
+    writeFileSync(join(root, "src", "nested", "skip.js"), "");
+    writeFileSync(join(root, "src", "nested", "skip.json"), "");
+    writeFileSync(join(root, "src", "node_modules", "pkg", "index.ts"), "");
+
+    const files = expandDirectory(root).map((file) => relative(root, file));
+    assert.deepEqual(files, [
+      join("src", "a.ts"),
+      join("src", "nested", "b.vue"),
+      join("src", "nested", "c.mts"),
+      join("src", "nested", "d.cts"),
+      join("src", "nested", "e.tsx"),
+    ]);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("expandDirectory 跟随指向目录的符号链接，环形链接不会无限递归", () => {
+  const root = mkdtempSync(join(tmpdir(), "vtf-expand-link-"));
+  try {
+    mkdirSync(join(root, "src"), { recursive: true });
+    writeFileSync(join(root, "src", "a.ts"), "");
+    // 建不了符号链接的平台（Windows 缺特权）跳过，别变成随机失败
+    if (!canCreateSymlink(root, join(root, "src"), "dir")) return;
+    symlinkSync(join(root, "src"), join(root, "link"), "dir");
+    // 指回自身的链接形成环，必须被截断
+    symlinkSync(root, join(root, "src", "loop"), "dir");
+
+    const files = expandDirectory(root).map((file) => relative(root, file));
+    // 同一目录经两条路径出现都收集：路径不同，诊断归属也不同
+    assert.deepEqual(files, [join("link", "a.ts"), join("src", "a.ts")]);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("expandDirectory 排除指向 node_modules 的文件符号链接，保留普通文件链接", () => {
+  const root = mkdtempSync(join(tmpdir(), "vtf-expand-file-link-"));
+  try {
+    mkdirSync(join(root, "src"));
+    mkdirSync(join(root, "node_modules", "pkg"), { recursive: true });
+    writeFileSync(join(root, "outside.ts"), "");
+    writeFileSync(join(root, "node_modules", "pkg", "bad.ts"), "");
+    if (!canCreateSymlink(root, join(root, "src"), "dir")) return;
+    symlinkSync(join(root, "outside.ts"), join(root, "src", "good.ts"), "file");
+    symlinkSync(join(root, "node_modules", "pkg", "bad.ts"), join(root, "src", "dep.ts"), "file");
+
+    assert.deepEqual(expandDirectory(join(root, "src")), [join(root, "src", "good.ts")]);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("resolveSourceArg 区分文件、目录、缺失路径、不支持类型与 glob", () => {
+  const root = mkdtempSync(join(tmpdir(), "vtf-resolve-"));
+  try {
+    writeFileSync(join(root, "a.ts"), "");
+    writeFileSync(join(root, "readme.md"), "");
+    mkdirSync(join(root, "src"));
+    assert.equal(resolveSourceArg("a.ts", root).kind, "file");
+    assert.equal(resolveSourceArg("src", root).kind, "directory");
+    assert.equal(resolveSourceArg("missing", root).kind, "missing");
+    assert.equal(resolveSourceArg("readme.md", root).kind, "unsupported");
+    assert.equal(resolveSourceArg("src/**/*.ts", root).kind, "glob");
+    assert.equal(resolveSourceArg(join(root, "src"), root).absolutePath, join(root, "src"));
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("resolveSourceArg 已有路径优先于 glob 字符判定", () => {
+  const root = mkdtempSync(join(tmpdir(), "vtf-resolve-literal-glob-"));
+  try {
+    if (process.platform === "win32") {
+      assert.equal(resolveSourceArg(`\\\\?\\${root}`).kind, "directory");
+    } else {
+      mkdirSync(join(root, "literal?dir"));
+      writeFileSync(join(root, "literal*.ts"), "");
+      assert.equal(resolveSourceArg("literal?dir", root).kind, "directory");
+      assert.equal(resolveSourceArg("literal*.ts", root).kind, "file");
+    }
+    assert.equal(resolveSourceArg("missing/**/*.ts", root).kind, "glob");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("setupArgs 目录参数递归展开为源文件，目录本身不再转发给 vue-tsc", () => {
+  const root = mkdtempSync(join(tmpdir(), "vtf-dir-args-"));
+  const prevCwd = process.cwd();
+  try {
+    mkdirSync(join(root, "src", "nested"), { recursive: true });
+    writeFileSync(join(root, "src", "a.ts"), "");
+    writeFileSync(join(root, "src", "nested", "b.vue"), "");
+    process.chdir(root);
+    withArgv(["src"], () => {
+      const { files, specifiedFiles, remainingArgsToForward } = setupArgs();
+      assert.deepEqual(
+        specifiedFiles.map((file) => relative(root, file)),
+        [join("src", "a.ts"), join("src", "nested", "b.vue")],
+      );
+      // 目录实参不能转发：会和 -p 临时配置冲突（TS5042）
+      assert.deepEqual(remainingArgsToForward, []);
+      assert.notEqual(files, specifiedFiles);
+    });
+  } finally {
+    process.chdir(prevCwd);
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("setupArgs 目录与文件混用时目录展开、文件保留，且目录不转发", () => {
+  const root = mkdtempSync(join(tmpdir(), "vtf-dir-mixed-"));
+  const prevCwd = process.cwd();
+  try {
+    mkdirSync(join(root, "src", "nested"), { recursive: true });
+    writeFileSync(join(root, "src", "a.ts"), "");
+    writeFileSync(join(root, "src", "nested", "b.vue"), "");
+    writeFileSync(join(root, "extra.ts"), "");
+    process.chdir(root);
+    withArgv(["src", "extra.ts"], () => {
+      const { specifiedFiles, remainingArgsToForward } = setupArgs();
+      assert.deepEqual(
+        specifiedFiles.map((file) => relative(root, file)),
+        [join("src", "a.ts"), join("src", "nested", "b.vue"), "extra.ts"],
+      );
+      assert.deepEqual(remainingArgsToForward, []);
+    });
+  } finally {
+    process.chdir(prevCwd);
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("setupArgs 目录展开结果与显式文件重复时按绝对路径去重", () => {
+  const root = mkdtempSync(join(tmpdir(), "vtf-dir-dedup-"));
+  const prevCwd = process.cwd();
+  try {
+    mkdirSync(join(root, "src"), { recursive: true });
+    writeFileSync(join(root, "src", "a.ts"), "");
+    process.chdir(root);
+    withArgv(["src", join("src", "a.ts")], () => {
+      const { specifiedFiles } = setupArgs();
+      assert.equal(specifiedFiles.length, 1);
+      assert.equal(relative(root, specifiedFiles[0]!), join("src", "a.ts"));
+    });
+  } finally {
+    process.chdir(prevCwd);
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("setupArgs 选项取值即使与目录同名也不展开", () => {
+  const root = mkdtempSync(join(tmpdir(), "vtf-dir-optvalue-"));
+  const prevCwd = process.cwd();
+  try {
+    mkdirSync(join(root, "src"), { recursive: true });
+    writeFileSync(join(root, "src", "a.ts"), "");
+    process.chdir(root);
+    withArgv(["src", "--outDir", "src"], () => {
+      const { specifiedFiles, remainingArgsToForward } = setupArgs();
+      // 第二个 src 是 --outDir 的取值：只转发，不展开
+      assert.deepEqual(remainingArgsToForward, ["--outDir", "src"]);
+      assert.deepEqual(
+        specifiedFiles.map((file) => relative(root, file)),
+        [join("src", "a.ts")],
+      );
+    });
+  } finally {
+    process.chdir(prevCwd);
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("resolveSourceArg 源文件后缀的真实目录优先，缺失源文件仍保留", () => {
+  const root = mkdtempSync(join(tmpdir(), "vtf-resolve-suffix-"));
+  try {
+    for (const suffix of ["ts", "tsx", "vue", "mts", "cts"]) {
+      mkdirSync(join(root, `src.${suffix}`));
+      assert.equal(resolveSourceArg(`src.${suffix}`, root).kind, "directory");
+      assert.equal(resolveSourceArg(`missing.${suffix}`, root).kind, "file");
+    }
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("expandDirectory 入口、子目录和 cwd 内的 node_modules 路径段均跳过", () => {
+  const root = mkdtempSync(join(tmpdir(), "vtf-expand-deps-"));
+  const prevCwd = process.cwd();
+  try {
+    const dependency = join(root, "node_modules", "pkg");
+    mkdirSync(dependency, { recursive: true });
+    writeFileSync(join(dependency, "bad.ts"), "");
+    writeFileSync(join(root, "good.ts"), "");
+    assert.deepEqual(expandDirectory(join(root, "node_modules")), []);
+    assert.deepEqual(expandDirectory(dependency), []);
+    assert.deepEqual(expandDirectory(root), [join(root, "good.ts")]);
+    if (process.platform === "win32") {
+      assert.deepEqual(expandDirectory(join(root, "NODE_MODULES", "pkg")), []);
+      mkdirSync(join(root, "nested", "NODE_MODULES"), { recursive: true });
+      writeFileSync(join(root, "nested", "NODE_MODULES", "bad.ts"), "");
+      assert.deepEqual(expandDirectory(root), [join(root, "good.ts")]);
+    }
+    process.chdir(dependency);
+    assert.deepEqual(expandDirectory("."), []);
+  } finally {
+    process.chdir(prevCwd);
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("expandDirectory node_modules 的符号链接别名不能绕过排除", () => {
+  const root = mkdtempSync(join(tmpdir(), "vtf-expand-deps-link-"));
+  try {
+    const dependency = join(root, "node_modules", "pkg");
+    mkdirSync(dependency, { recursive: true });
+    writeFileSync(join(dependency, "bad.ts"), "");
+    writeFileSync(join(root, "good.ts"), "");
+    if (!canCreateSymlink(root, dependency, "dir")) return;
+    symlinkSync(dependency, join(root, "alias"), "dir");
+    assert.deepEqual(expandDirectory(join(root, "alias")), []);
+    assert.deepEqual(expandDirectory(root), [join(root, "good.ts")]);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("setupArgs 保留原始路径单引号，不把不同文件去重合并", () => {
+  withArgv(["good.ts", "'good.ts", "'src'/good.ts", "src/good.ts", "'good.ts"], () => {
+    assert.deepEqual(setupArgs().specifiedFiles, [
+      "good.ts",
+      "'good.ts",
+      "'src'/good.ts",
+      "src/good.ts",
+    ]);
+  });
+});
+
+test("setupArgs list 选项保留前导空白后的横线边界，string 选项仍消费该值", () => {
+  const root = mkdtempSync(join(tmpdir(), "vtf-list-boundary-"));
+  const prevCwd = process.cwd();
+  try {
+    const directory = " -src";
+    mkdirSync(join(root, directory));
+    writeFileSync(join(root, directory, "bad.ts"), "");
+    process.chdir(root);
+    for (const option of ["--types", "--lib"]) {
+      withArgv(["good.ts", option, directory], () => {
+        const result = setupArgs();
+        assert.deepEqual(result.specifiedFiles, ["good.ts", join(root, directory, "bad.ts")]);
+        assert.deepEqual(result.remainingArgsToForward, [option]);
+      });
+    }
+    withArgv(["good.ts", "--outDir", directory], () => {
+      const result = setupArgs();
+      assert.deepEqual(result.specifiedFiles, ["good.ts"]);
+      assert.deepEqual(result.remainingArgsToForward, ["--outDir", directory]);
+    });
+  } finally {
+    process.chdir(prevCwd);
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("setupArgs true/false/null 目录与选项值按 TS 实际消费位置区分", () => {
+  const root = mkdtempSync(join(tmpdir(), "vtf-literal-args-"));
+  const prevCwd = process.cwd();
+  try {
+    for (const value of ["true", "false", "null"]) {
+      mkdirSync(join(root, value));
+      writeFileSync(join(root, value, "bad.ts"), "");
+    }
+    process.chdir(root);
+    for (const value of ["true", "false", "null"]) {
+      for (const args of [
+        [value, "--pretty", "false", "-p", "config.json"],
+        ["--pretty", "false", "-p", "config.json", value],
+        ["--strict", value, "-p", "config.json", value],
+        ["--composite", value, value],
+        ["--outDir", "", value],
+        ["--types", "", value],
+      ]) {
+        withArgv(args, () => {
+          const result = setupArgs();
+          assert.deepEqual(result.specifiedFiles, [join(root, value, "bad.ts")], args.join(" "));
+          const expected = args.filter((_, index) =>
+            args[0] === value ? index !== 0 : index !== args.length - 1,
+          );
+          const projectIndex = expected.indexOf("-p");
+          if (projectIndex >= 0) expected.splice(projectIndex, 2);
+          assert.deepEqual(result.remainingArgsToForward, expected, args.join(" "));
+        });
+      }
+    }
+    for (const option of ["--strict", "--composite"]) {
+      withArgv([option, "null", "good.ts"], () => {
+        assert.deepEqual(setupArgs().remainingArgsToForward, [option, "null"]);
+        assert.deepEqual(setupArgs().specifiedFiles, ["good.ts"]);
+      });
+    }
+  } finally {
+    process.chdir(prevCwd);
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 for (const [name, status, output, exitCode, ignoredDependencyErrors] of [
   ["status 0 优先于诊断", 0, "src/a.ts(1,1): error TS2322: x", 0, false],
   ["null 加空输出", null, "", 1, false],
@@ -367,6 +686,22 @@ test("filterErrorsInFiles 兼容含空格及单引号包裹的路径", () => {
   // 防御性格式：部分 formatter 会给含空格路径加单引号
   const quoted = "'src/foo bar.ts'(1,7): error TS2322: x";
   assert.equal(filterErrorsInFiles(quoted, ["src/foo bar.ts"]).errorsInSpecifiedFiles.length, 1);
+});
+
+test("filterErrorsInFiles 原始单引号路径优先，并兼容成对引号 formatter", () => {
+  for (const file of ["'good.ts", "'src'/bad.ts", "'src/bad.ts", "src'/bad.ts"]) {
+    for (const path of [file, `'${file}'`]) {
+      for (const location of ["(1,7):", ":1:7 -"]) {
+        const output = `${path}${location} error TS2322: x`;
+        assert.equal(filterErrorsInFiles(output, [file]).errorsInSpecifiedFiles.length, 1, output);
+        assert.equal(getDiagnosticExitResult(2, output, [file]).exitCode, 2, output);
+      }
+    }
+  }
+  assert.deepEqual(
+    filterErrorsInFiles("good.ts(1,7): error TS2322: x", ["'good.ts"]).errorsInSpecifiedFiles,
+    [],
+  );
 });
 
 test("filterErrorsInFiles 保留位置诊断路径的前导空白，不被 trim 成别的文件", () => {

@@ -4,7 +4,7 @@ Guidance for AI coding assistants working in this repository.
 
 ## Project
 
-`vue-tsc-files` — a tiny CLI that runs `vue-tsc` on specific files without ignoring `tsconfig.json`. Published as `@whiter001/vue-tsc-files`.
+`vue-tsc-files` — a tiny CLI that runs `vue-tsc` on specific files or recursively expanded directories without ignoring `tsconfig.json`. Directory expansion skips `node_modules` paths (including directory symlink targets) and fails on unreadable directories rather than silently checking a partial file set. Published as `@whiter001/vue-tsc-files`.
 
 It also ships an agent skill at `.agents/skills/vue-tsc-files/` (inside the npm package via `files`); users install it with `vue-tsc-files install --skill [--user]`, which copies that directory into `.agents/skills/` and never loads TypeScript.
 

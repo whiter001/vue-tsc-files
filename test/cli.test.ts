@@ -658,13 +658,398 @@ test("无有效文件参数时以 1 退出并输出用法指引", () => {
     "good.js": "export default 1;\n",
   });
   try {
-    // 完全没传文件、参数全被扩展名过滤掉、传目录：都是用法错误，
-    // 且发生在读取 tsconfig 之前
-    for (const args of [[], ["good.js"], ["."]]) {
-      const result = runCli(root, args);
-      assert.equal(result.status, 1, `args: ${JSON.stringify(args)} ${result.stderr}`);
-      assert.match(result.stderr, /No files to check/);
+    // 完全没传文件：用法错误，且发生在读取 tsconfig 之前
+    const result = runCli(root, []);
+    assert.equal(result.status, 1, result.stderr);
+    assert.match(result.stderr, /No files to check/);
+    // 不受支持的文件类型给出明确的用法错误，而不是落进 TS6053/TS5042
+    const unsupported = runCli(root, ["good.js"]);
+    assert.equal(unsupported.status, 1, unsupported.stderr);
+    assert.match(unsupported.stderr, /Unsupported file type/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("目录参数递归展开，嵌套目录里的类型错误被报出", () => {
+  const root = createFixture({
+    "src/good.ts": "const a: number = 1;\nexport default a;\n",
+    "src/nested/bad.ts": 'const a: number = "x";\nexport default a;\n',
+  });
+  try {
+    const result = runCli(root, ["src"]);
+    assert.equal(result.status, 2, result.stdout + result.stderr);
+    assert.match(result.stdout, /nested[\\/]bad\.ts\(\d+,\d+\): error TS2322/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("目录读取或符号链接 stat 失败时不能因另有 good.ts 而假绿", () => {
+  const root = createFixture({
+    "good.ts": "export const value = 1;\n",
+    "src/nested/bad.ts": 'export const value: number = "x";\n',
+  });
+  try {
+    for (const [method, relativePath] of [
+      ["realpathSync", "src/nested"],
+      ["readdirSync", "src/nested"],
+      ["statSync", "src"],
+      ["statSync", "src/link.ts"],
+    ]) {
+      const failedPath = join(root, relativePath!);
+      writeFileSync(
+        join(root, "mock.cjs"),
+        `const fs = require("fs");
+const path = require("path");
+const original = fs[${JSON.stringify(method)}];
+fs[${JSON.stringify(method)}] = function (file, ...args) {
+  if (path.resolve(String(file)) === ${JSON.stringify(failedPath)}) {
+    throw Object.assign(new Error("EACCES: injected permission denied"), { code: "EACCES" });
+  }
+  return original.call(this, file, ...args);
+};
+${method === "realpathSync" ? "fs.realpathSync.native = fs.realpathSync;" : ""}
+${
+  relativePath === "src/link.ts"
+    ? `const read = fs.readdirSync;
+fs.readdirSync = function (file, ...args) {
+  const entries = read.call(this, file, ...args);
+  if (path.resolve(String(file)) === ${JSON.stringify(join(root, "src"))}) {
+    entries.push({ name: "link.ts", isDirectory: () => false, isSymbolicLink: () => true });
+  }
+  return entries;
+};`
+    : ""
+}
+require("module").syncBuiltinESMExports();`,
+      );
+      const result = spawnSync(
+        process.execPath,
+        ["--require", join(root, "mock.cjs"), CLI, "good.ts", "src"],
+        { cwd: root, encoding: "utf8" },
+      );
+      assert.equal(result.status, 1, result.stdout + result.stderr);
+      assert.ok(result.stderr.includes(failedPath), result.stderr);
+      assert.match(result.stderr, /Cannot read path.*EACCES: injected permission denied/);
+      assert.doesNotMatch(result.stderr, /at (?:walk|resolveSourceArg)/);
+      assert.deepEqual(readdirSyncTmpArtifacts(root), []);
     }
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("目录展开仅跳过 ENOENT 或 ENOTDIR 的悬空符号链接", () => {
+  const root = createFixture({ "src/good.ts": "export const value = 1;\n" });
+  try {
+    for (const code of ["ENOENT", "ENOTDIR"]) {
+      writeFileSync(
+        join(root, "mock.cjs"),
+        `const fs = require("fs");
+const path = require("path");
+const read = fs.readdirSync;
+const stat = fs.statSync;
+fs.readdirSync = function (file, ...args) {
+  const entries = read.call(this, file, ...args);
+  if (path.resolve(String(file)) === ${JSON.stringify(join(root, "src"))}) {
+    entries.push({ name: "link.ts", isDirectory: () => false, isSymbolicLink: () => true });
+  }
+  return entries;
+};
+fs.statSync = function (file, ...args) {
+  if (path.resolve(String(file)) === ${JSON.stringify(join(root, "src", "link.ts"))}) {
+    throw Object.assign(new Error(${JSON.stringify(code)}), { code: ${JSON.stringify(code)} });
+  }
+  return stat.call(this, file, ...args);
+};
+require("module").syncBuiltinESMExports();`,
+      );
+      const result = spawnSync(
+        process.execPath,
+        ["--require", join(root, "mock.cjs"), CLI, "src"],
+        { cwd: root, encoding: "utf8" },
+      );
+      assert.equal(result.status, 0, result.stdout + result.stderr);
+      assert.deepEqual(readdirSyncTmpArtifacts(root), []);
+    }
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("源文件后缀的目录递归检查，缺失源文件仍由 vue-tsc 报 TS6053", () => {
+  const root = createFixture({
+    "src.ts/nested/bad.ts": 'export const value: number = "x";\n',
+  });
+  try {
+    const directory = runCli(root, ["src.ts"]);
+    assert.equal(directory.status, 2, directory.stdout + directory.stderr);
+    assert.match(directory.stdout, /bad\.ts.*error TS2322/);
+    assert.doesNotMatch(directory.stdout + directory.stderr, /TS6053|TS6231/);
+    const missing = runCli(root, ["missing.ts"]);
+    assert.equal(missing.status, 2, missing.stdout + missing.stderr);
+    assert.match(missing.stdout, /error TS6053/);
+    assert.deepEqual(readdirSyncTmpArtifacts(root), []);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("单引号文件与普通文件不会合并，过滤模式保留单引号路径的错误", () => {
+  const root = createFixture({
+    "good.ts": "export const value = 1;\n",
+    "'good.ts": 'export const value: number = "x";\n',
+    "'src'/bad.ts": 'export const value: number = "x";\n',
+  });
+  try {
+    for (const flags of [[], ["--errors-in-changed-only"]]) {
+      for (const file of ["'good.ts", "'src'/bad.ts"]) {
+        const result = runCli(root, [...flags, "good.ts", file]);
+        assert.equal(result.status, 2, result.stdout + result.stderr);
+        assert.match(result.stdout, /error TS2322/);
+        assert.doesNotMatch(result.stderr, /ignored by/);
+        assert.deepEqual(readdirSyncTmpArtifacts(root), []);
+      }
+    }
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("list 选项不吞前导空白后以横线开头的目录，string 选项仍消费它", () => {
+  const root = createFixture({
+    "good.ts": "export const value = 1;\n",
+    " -src/bad.ts": 'export const value: number = "x";\n',
+  });
+  try {
+    const result = runCli(root, ["good.ts", "--types", " -src"]);
+    assert.equal(result.status, 2, result.stdout + result.stderr);
+    assert.match(result.stdout, /bad\.ts.*error TS2322/);
+    assert.doesNotMatch(result.stdout + result.stderr, /TS5042/);
+    const consumed = runCli(root, ["good.ts", "--outDir", " -src"]);
+    assert.equal(consumed.status, 0, consumed.stdout + consumed.stderr);
+    assert.deepEqual(readdirSyncTmpArtifacts(root), []);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("true/false/null 目录与 --pretty/-p 混用仍检查，选项字面量值不展开", () => {
+  const root = createFixture({
+    "good.ts": "export const value = 1;\n",
+    "true/bad.ts": 'export const value: number = "x";\n',
+    "false/bad.ts": 'export const value: number = "x";\n',
+    "null/bad.ts": 'export const value: number = "x";\n',
+  });
+  try {
+    for (const value of ["true", "false", "null"]) {
+      for (const args of [
+        [value, "--pretty", "false", "-p", "tsconfig.json"],
+        ["--pretty", "false", "-p", "tsconfig.json", value],
+        ["--strict", value, "-p", "tsconfig.json", value],
+      ]) {
+        const result = runCli(root, args);
+        assert.equal(result.status, 2, `${args.join(" ")}: ${result.stdout}${result.stderr}`);
+        assert.match(result.stdout, /bad\.ts.*error TS2322/);
+        assert.deepEqual(readdirSyncTmpArtifacts(root), []);
+      }
+    }
+    for (const option of ["--strict", "--composite"]) {
+      const result = runCli(root, [option, "null", "good.ts"]);
+      assert.equal(result.status, 0, result.stdout + result.stderr);
+      assert.doesNotMatch(result.stdout, /bad\.ts/);
+      assert.deepEqual(readdirSyncTmpArtifacts(root), []);
+    }
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("目录与文件混用不再触发 TS5042", () => {
+  const root = createFixture({
+    "src/good.ts": "const a: number = 1;\nexport default a;\n",
+    "src/bad.ts": 'const a: number = "x";\nexport default a;\n',
+  });
+  try {
+    const result = runCli(root, ["src", "src/good.ts"]);
+    assert.equal(result.status, 2, result.stdout + result.stderr);
+    assert.doesNotMatch(result.stdout + result.stderr, /TS5042/);
+    assert.match(result.stdout, /bad\.ts\(\d+,\d+\): error TS2322/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("目录展开跳过 node_modules 里的依赖代码", () => {
+  const root = createFixture({
+    "src/good.ts": "const a: number = 1;\nexport default a;\n",
+    "src/node_modules/pkg/bad.ts": 'const a: number = "x";\nexport default a;\n',
+  });
+  try {
+    const result = runCli(root, ["src"]);
+    assert.equal(result.status, 0, result.stdout + result.stderr);
+    assert.doesNotMatch(result.stdout, /bad\.ts/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("node_modules 入口、子目录和 cwd 的点目录均排除，显式文件与导入不受影响", () => {
+  const root = createFixture({
+    "good.ts": "export const value = 1;\n",
+    "imports.ts": 'export { value } from "./node_modules/pkg/bad";\n',
+    "node_modules/pkg/bad.ts": 'export const value: number = "x";\n',
+  });
+  try {
+    for (const directory of ["node_modules", "node_modules/pkg"]) {
+      const empty = runCli(root, [directory]);
+      assert.equal(empty.status, 1, empty.stdout + empty.stderr);
+      assert.match(empty.stderr, /No checkable files in directory/);
+      const mixed = runCli(root, ["good.ts", directory]);
+      assert.equal(mixed.status, 0, mixed.stdout + mixed.stderr);
+      assert.match(mixed.stderr, /Warning:.*skipped/);
+      assert.doesNotMatch(mixed.stdout, /bad\.ts/);
+      assert.deepEqual(readdirSyncTmpArtifacts(root), []);
+    }
+    const dependency = join(root, "node_modules", "pkg");
+    const dot = runCli(dependency, ["."]);
+    assert.equal(dot.status, 1, dot.stdout + dot.stderr);
+    assert.match(dot.stderr, /No checkable files in directory/);
+    for (const file of ["node_modules/pkg/bad.ts", "imports.ts"]) {
+      const result = runCli(root, [file]);
+      assert.equal(result.status, 2, result.stdout + result.stderr);
+      assert.match(result.stdout, /bad\.ts.*error TS2322/);
+      assert.deepEqual(readdirSyncTmpArtifacts(root), []);
+    }
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("node_modules 符号链接别名入口和嵌套目录都排除", () => {
+  const root = createFixture({
+    "src/good.ts": "export const value = 1;\n",
+    "node_modules/pkg/bad.ts": 'export const value: number = "x";\n',
+  });
+  try {
+    const dependency = join(root, "node_modules", "pkg");
+    if (!canCreateSymlink(root, dependency, "dir")) return;
+    symlinkSync(dependency, join(root, "src", "alias"), "dir");
+    const empty = runCli(root, ["src/alias"]);
+    assert.equal(empty.status, 1, empty.stdout + empty.stderr);
+    assert.match(empty.stderr, /No checkable files in directory/);
+    const mixed = runCli(root, ["src/good.ts", "src/alias"]);
+    assert.equal(mixed.status, 0, mixed.stdout + mixed.stderr);
+    assert.match(mixed.stderr, /Warning:.*skipped/);
+    const nested = runCli(root, ["src"]);
+    assert.equal(nested.status, 0, nested.stdout + nested.stderr);
+    assert.doesNotMatch(nested.stdout, /bad\.ts/);
+    assert.deepEqual(readdirSyncTmpArtifacts(root), []);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("原生 realpath 还原的 Windows 短路径仍排除 node_modules", () => {
+  const root = createFixture({
+    "src/bad.ts": 'export const value: number = "x";\n',
+    "node_modules/pkg/good.ts": "export const value = 1;\n",
+  });
+  try {
+    const source = join(root, "src");
+    const dependency = join(root, "node_modules", "pkg");
+    writeFileSync(
+      join(root, "mock.cjs"),
+      `const fs = require("fs");
+const path = require("path");
+const native = fs.realpathSync.native;
+fs.realpathSync.native = function (file, ...args) {
+  if (path.resolve(String(file)) === ${JSON.stringify(source)}) {
+    return ${JSON.stringify(dependency)};
+  }
+  return native.call(this, file, ...args);
+};
+require("module").syncBuiltinESMExports();`,
+    );
+    const result = spawnSync(process.execPath, ["--require", join(root, "mock.cjs"), CLI, "src"], {
+      cwd: root,
+      encoding: "utf8",
+    });
+    assert.equal(result.status, 1, result.stdout + result.stderr);
+    assert.match(result.stderr, /No checkable files in directory/);
+    assert.doesNotMatch(result.stdout, /bad\.ts/);
+    assert.deepEqual(readdirSyncTmpArtifacts(root), []);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("目录里没有可检查文件时给出明确用法错误并以 1 退出", () => {
+  const root = createFixture({
+    "src/readme.txt": "no sources here\n",
+  });
+  try {
+    const result = runCli(root, ["src"]);
+    assert.equal(result.status, 1, result.stdout + result.stderr);
+    assert.match(result.stderr, /No checkable files in directory/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("目录不存在的路径给出明确用法错误，不再落到 TS6053", () => {
+  const root = createFixture({
+    "src/good.ts": "const a: number = 1;\nexport default a;\n",
+  });
+  try {
+    const result = runCli(root, ["src/typo"]);
+    assert.equal(result.status, 1, result.stdout + result.stderr);
+    assert.match(result.stderr, /Path not found/);
+    assert.doesNotMatch(result.stdout + result.stderr, /TS6053/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("glob 模式给出明确用法错误并提示改用目录", () => {
+  const root = createFixture({
+    "src/good.ts": "const a: number = 1;\nexport default a;\n",
+  });
+  try {
+    const result = runCli(root, ["src/**/*.ts"]);
+    assert.equal(result.status, 1, result.stdout + result.stderr);
+    assert.match(result.stderr, /Glob patterns are not supported/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("目录展开的文件参与 --errors-in-changed-only 的错误归属", () => {
+  const root = createFixture({
+    "src/good.ts": 'import a from "../dep";\nexport default a;\n',
+    "src/bad.ts": 'const a: number = "x";\nexport default a;\n',
+    "dep.ts": 'const a: number = "x";\nexport default a;\n',
+  });
+  try {
+    // 目录内的错误计入退出码；目录外的依赖错误按传递依赖豁免
+    const result = runCli(root, ["--errors-in-changed-only", "src"]);
+    assert.equal(result.status, 2, result.stdout + result.stderr);
+    assert.match(result.stdout, /bad\.ts\(\d+,\d+\): error TS2322/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("目录外的依赖错误在 --errors-in-changed-only 下仍被豁免", () => {
+  const root = createFixture({
+    "src/good.ts": 'import a from "../dep";\nexport default a;\n',
+    "dep.ts": 'const a: number = "x";\nexport default a;\n',
+  });
+  try {
+    const result = runCli(root, ["--errors-in-changed-only", "src"]);
+    assert.equal(result.status, 0, result.stdout + result.stderr);
+    assert.match(result.stdout, /dep\.ts\(\d+,\d+\): error TS2322/);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

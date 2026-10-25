@@ -18,6 +18,7 @@ import { spawnSync } from "child_process";
 import { homedir } from "os";
 import { createRequire } from "module";
 import { fileURLToPath, pathToFileURL } from "url";
+import type { Dirent, Stats } from "fs";
 import type tsTypes from "typescript";
 import type { TSConfig } from "@json-types/tsconfig";
 
@@ -68,7 +69,7 @@ const HELP_FLAGS = new Set(["-h", "--help"]);
 /** 版本查询开关：只打印版本，不触发类型检查 */
 const VERSION_FLAG = "--version";
 
-/** install 子命令名，裸取字面量匹配；该词不带源文件扩展名，不会与文件收集冲突 */
+/** 首个实参裸写 install 时优先识别为子命令；同名目录用 ./install。 */
 const INSTALL_COMMAND = "install";
 
 /** 随包分发的 skill 目录名，需与 package.json files 中声明的路径保持一致 */
@@ -94,6 +95,7 @@ const HELP_TEXT = `vue-tsc-files — run vue-tsc on specific files without ignor
 
 Usage:
   vue-tsc-files [flags] <files...>
+  vue-tsc-files [flags] <dirs...>
   vue-tsc-files [--changed | --staged | --unstaged] [flags]
   vue-tsc-files install --skill [--user] [--force]
 
@@ -105,6 +107,11 @@ Commands:
 File collection:
   <files...>                  .vue/.ts/.tsx/.mts/.cts files, resolved against the
                               current working directory (absolute paths also work)
+  <dirs...>                   Directories are expanded recursively: every
+                              .vue/.ts/.tsx/.mts/.cts file under them is checked.
+                              node_modules paths (including directory symlink
+                              targets) are skipped. Unreadable directories fail
+                              the check. Let the shell expand glob patterns.
   --changed                   Collect changed files from git status
                               (staged + unstaged + untracked)
   --staged                    Collect only staged files (the git index).
@@ -488,10 +495,12 @@ export function setupArgs() {
     process.exit(1);
   }
 
-  const sourceIndices: number[] = [];
+  // 实参：既不是 flag、也不是 project 取值的非选项参数。
+  // 可能是待检查的文件、待展开的目录，也可能是被选项消费掉的值（如 --outDir src）。
+  const positionalIndices: number[] = [];
   for (let i = 0; i < rest.length; i++) {
-    if (!projectIndices.has(i) && !rest[i]!.startsWith("-") && isTscFile(rest[i]!)) {
-      sourceIndices.push(i);
+    if (!projectIndices.has(i) && !rest[i]!.startsWith("-")) {
+      positionalIndices.push(i);
     }
   }
 
@@ -509,45 +518,112 @@ export function setupArgs() {
     }
   }
 
-  const resolvedSources = new Set(sourceIndices);
-  if (sourceIndices.length > 0 && rest.some((arg) => arg.startsWith("-"))) {
-    // 用位置标记区分同名文件和 option 值，并保留 project 对 list option 的边界。
+  const resolvedSources = new Set(positionalIndices);
+  if (positionalIndices.length > 0 && rest.some((arg) => arg.startsWith("-"))) {
+    // 字面量、空值与 trim 后以 - 开头的列表边界不能替换成普通路径标记。
+    const isBoundaryValue = (arg: string) =>
+      arg === "true" ||
+      arg === "false" ||
+      arg === "null" ||
+      arg === "" ||
+      arg.trimStart().startsWith("-");
+    const ts = getTypescript();
     const prefix = `__vue_tsc_files_${randomChars()}_`;
     const markedArgs = rest.map((arg, index) =>
-      resolvedSources.has(index) ? `${prefix}${index}.ts` : arg,
+      resolvedSources.has(index) && !isBoundaryValue(arg) ? `${prefix}${index}.ts` : arg,
     );
-    const fileNames = new Set(getTypescript().parseCommandLine(markedArgs).fileNames);
-    for (const index of sourceIndices) {
-      if (!fileNames.has(markedArgs[index]!)) {
-        resolvedSources.delete(index);
-      }
+    const fileNames = new Set(ts.parseCommandLine(markedArgs).fileNames);
+    for (const index of positionalIndices) {
+      const positional = isBoundaryValue(rest[index]!)
+        ? ts.parseCommandLine(rest.slice(0, index + 1)).fileNames.length >
+          ts.parseCommandLine(rest.slice(0, index)).fileNames.length
+        : fileNames.has(markedArgs[index]!);
+      if (!positional) resolvedSources.delete(index);
     }
   }
 
-  const seen = new Set([...resolvedSources].map((index) => rest[index]!));
-  for (const file of gitFiles) {
-    seen.add(file);
-  }
   const remainingArgsToForward = rest.filter(
     (_, index) => !projectIndices.has(index) && !resolvedSources.has(index),
   );
-
-  const specifiedFiles = [...seen];
-
-  if (specifiedFiles.length > 0 && rest.some((arg) => arg.startsWith("-"))) {
+  if (
+    (resolvedSources.size > 0 || gitFiles.length > 0) &&
+    rest.some((arg) => arg.startsWith("-"))
+  ) {
     const ts = getTypescript();
     const original = ts.parseCommandLine(rest).options;
+    // 保留已判定为实参的字面量，防止移除 project 后它反而被布尔选项消费。
+    const withoutProject = ts.parseCommandLine(
+      rest.filter(
+        (arg, index) =>
+          !projectIndices.has(index) &&
+          (!resolvedSources.has(index) || arg === "true" || arg === "false" || arg === "null"),
+      ),
+    ).options;
     const forwarded = ts.parseCommandLine([...remainingArgsToForward, "--noEmit"]).options;
-    const keys = new Set([...Object.keys(original), ...Object.keys(forwarded)]);
+    const keys = new Set([
+      ...Object.keys(original),
+      ...Object.keys(withoutProject),
+      ...Object.keys(forwarded),
+    ]);
     keys.delete("project");
     keys.delete("noEmit");
     if (
       forwarded.noEmit !== true ||
-      [...keys].some((key) => JSON.stringify(original[key]) !== JSON.stringify(forwarded[key]))
+      [...keys].some(
+        (key) =>
+          JSON.stringify(original[key]) !== JSON.stringify(withoutProject[key]) ||
+          JSON.stringify(original[key]) !== JSON.stringify(forwarded[key]),
+      )
     ) {
       console.error("Cannot safely forward compiler options: provide explicit option values.");
       process.exit(1);
     }
+  }
+
+  // 文件直接纳入检查；目录递归展开为源文件。目录实参本身不再转发给 vue-tsc，
+  // 否则会和 -p 临时配置冲突（TS5042）。
+  const collectedFiles: string[] = [];
+  const emptyDirectories: string[] = [];
+  for (const index of resolvedSources) {
+    const arg = rest[index]!;
+    let resolution: SourceArgResolution;
+    try {
+      resolution = resolveSourceArg(arg);
+      if (resolution.kind === "file") {
+        collectedFiles.push(arg);
+        continue;
+      }
+      if (resolution.kind === "directory") {
+        const expanded = expandDirectory(resolution.absolutePath);
+        if (expanded.length === 0) {
+          emptyDirectories.push(arg);
+          continue;
+        }
+        collectedFiles.push(...expanded);
+        continue;
+      }
+    } catch (error) {
+      console.error(error instanceof Error ? error.message : String(error));
+      process.exit(1);
+    }
+    console.error(describeSourceArgError(resolution.kind, arg));
+    process.exit(1);
+  }
+
+  // 同一文件可能既被显式传入、又被目录展开或 git 收集命中，按绝对路径去重
+  const seen = new Set<string>();
+  const specifiedFiles: string[] = [];
+  const addFile = (file: string) => {
+    const key = normalizeFilePath(file);
+    if (seen.has(key)) return;
+    seen.add(key);
+    specifiedFiles.push(file);
+  };
+  for (const file of collectedFiles) {
+    addFile(file);
+  }
+  for (const file of gitFiles) {
+    addFile(file);
   }
 
   if (specifiedFiles.length === 0) {
@@ -556,11 +632,24 @@ export function setupArgs() {
       console.log(`No ${source} files to type-check`);
       process.exit(0);
     }
+    if (emptyDirectories.length > 0) {
+      console.error(
+        `No checkable files in directory: ${emptyDirectories.join(", ")}. ` +
+          "A directory must contain at least one .vue/.ts/.tsx/.mts/.cts file.",
+      );
+      process.exit(1);
+    }
     // 用法错误不能静默 exit 0，否则 CI 门禁假绿
     console.error(
-      "No files to check: pass .vue/.ts/.tsx/.mts/.cts files, or use --changed/--staged/--unstaged.",
+      "No files to check: pass .vue/.ts/.tsx/.mts/.cts files or directories, " +
+        "or use --changed/--staged/--unstaged.",
     );
     process.exit(1);
+  }
+
+  // 目录展开为空但还有其他文件时不阻断检查，只提示被跳过的目录
+  for (const dir of emptyDirectories) {
+    console.error(`Warning: no checkable files in directory ${dir}; skipped.`);
   }
 
   const files = [...specifiedFiles];
@@ -606,6 +695,138 @@ export function isTscFile(arg: string) {
 
 export function getTscFiles(args: string[]) {
   return args.filter(isTscFile);
+}
+
+/** 目录展开时始终跳过的目录名：依赖代码不该参与检查，也不该被无谓遍历 */
+const SKIPPED_EXPANSION_DIRS = new Set(["node_modules"]);
+
+/** glob 通配符：仅用于识别不存在的路径，已有文件和目录可以合法包含这些字符 */
+const GLOB_MAGIC_RE = /[*?]/;
+
+export type SourceArgKind = "file" | "directory" | "missing" | "unsupported" | "glob";
+
+export interface SourceArgResolution {
+  kind: SourceArgKind;
+  /** 绝对路径；kind 为 glob 时仅用于报错展示 */
+  absolutePath: string;
+}
+
+/**
+ * 判定一个命令行实参是待检查文件、待展开目录，还是无效路径。
+ * 先识别真实文件和目录（名称可以带源文件扩展名或 glob 字符）；缺失的受支持源文件仍交给
+ * vue-tsc 报 TS6053，与既有版本一致。其它文件系统错误不能当成缺失路径忽略。
+ */
+export function resolveSourceArg(arg: string, cwd: string = process.cwd()): SourceArgResolution {
+  const absolutePath = resolve(cwd, arg);
+  let stats: Stats | undefined;
+  try {
+    stats = statSync(absolutePath, { throwIfNoEntry: false });
+  } catch (error) {
+    throw sourcePathError(absolutePath, error);
+  }
+  if (stats?.isDirectory()) return { kind: "directory", absolutePath };
+  if (stats) return { kind: isTscFile(arg) ? "file" : "unsupported", absolutePath };
+  if (GLOB_MAGIC_RE.test(arg)) return { kind: "glob", absolutePath };
+  return { kind: isTscFile(arg) ? "file" : "missing", absolutePath };
+}
+
+function sourcePathError(path: string, error: unknown): Error {
+  return new Error(
+    `Cannot read path ${path}: ${error instanceof Error ? error.message : String(error)}`,
+  );
+}
+
+function isSkippedExpansionPath(path: string): boolean {
+  return resolve(path)
+    .split(/[\\/]/)
+    .some((segment) =>
+      SKIPPED_EXPANSION_DIRS.has(process.platform === "win32" ? segment.toLowerCase() : segment),
+    );
+}
+
+/**
+ * 递归展开目录，收集受支持的源文件（.vue/.ts/.tsx/.mts/.cts）。
+ * 返回绝对路径并排序，顺序稳定可复现；读取失败抛出含实际路径的错误。
+ * node_modules 路径段始终跳过，包括入口与符号链接指向的真实路径。
+ * 符号链接按目标类型处理：同一目录经多条路径出现时都收集（路径不同，诊断归属也不同），
+ * 只有指回自身祖先的环形链接或悬空链接才跳过。
+ */
+export function expandDirectory(dir: string): string[] {
+  const files: string[] = [];
+
+  const walk = (current: string, ancestors: ReadonlySet<string>): void => {
+    if (isSkippedExpansionPath(current)) return;
+    let realPath: string;
+    try {
+      realPath = realpathSync.native(current);
+    } catch (error) {
+      throw sourcePathError(current, error);
+    }
+    if (isSkippedExpansionPath(realPath) || ancestors.has(realPath)) return;
+    const nextAncestors = new Set(ancestors).add(realPath);
+
+    let entries: Dirent[];
+    try {
+      entries = readdirSync(current, { withFileTypes: true });
+    } catch (error) {
+      throw sourcePathError(current, error);
+    }
+
+    for (const entry of entries) {
+      const absolute = join(current, entry.name);
+      if (isSkippedExpansionPath(absolute)) continue;
+      if (entry.isDirectory()) {
+        walk(absolute, nextAncestors);
+        continue;
+      }
+      if (entry.isSymbolicLink()) {
+        let target: Stats;
+        try {
+          target = statSync(absolute);
+        } catch (error) {
+          const code = (error as NodeJS.ErrnoException).code;
+          if (code === "ENOENT" || code === "ENOTDIR") continue;
+          throw sourcePathError(absolute, error);
+        }
+        if (target.isDirectory()) {
+          walk(absolute, nextAncestors);
+        } else if (target.isFile() && isTscFile(entry.name)) {
+          let realTarget: string;
+          try {
+            realTarget = realpathSync.native(absolute);
+          } catch (error) {
+            throw sourcePathError(absolute, error);
+          }
+          if (!isSkippedExpansionPath(realTarget)) files.push(absolute);
+        }
+        continue;
+      }
+      if (entry.isFile() && isTscFile(entry.name)) files.push(absolute);
+    }
+  };
+
+  walk(dir, new Set());
+  return files.sort();
+}
+
+/** 无效实参的用法错误文案 */
+function describeSourceArgError(kind: SourceArgKind, arg: string): string {
+  switch (kind) {
+    case "glob":
+      return (
+        `Glob patterns are not supported: ${arg}. ` +
+        "Pass a directory to check every file under it, or let the shell expand the pattern."
+      );
+    case "missing":
+      return `Path not found: ${arg}. Pass .vue/.ts/.tsx/.mts/.cts files or existing directories.`;
+    case "unsupported":
+      return (
+        `Unsupported file type: ${arg}. ` +
+        "Only .vue/.ts/.tsx/.mts/.cts files and directories can be checked."
+      );
+    default:
+      return `Invalid path: ${arg}.`;
+  }
 }
 
 /**
@@ -940,18 +1161,16 @@ export function stripAnsiCodes(text: string): string {
   return text.replace(ANSI_ESCAPE_RE, "");
 }
 
-/**
- * Normalizes a diagnostic file path for comparison with the specified files.
- * tsc prints paths relative to the current working directory; both sides are
- * resolved to absolute paths so "./a.ts" and "a.ts" compare equal.
- * 防御性去掉首尾单引号：tsc 当前不会对含空格的路径加引号，但部分
- * pretty 输出/第三方 formatter 会（如 'foo bar.ts'(1,1): error ...）。
- * Windows 文件系统不区分大小写，统一转小写。
- */
-function normalizeDiagnosticPath(filePath: string): string {
-  const unquoted = filePath.replace(/^'|'$/g, "");
-  const absolute = resolve(process.cwd(), unquoted).replace(/\\/g, "/");
+/** 统一相对路径与 Windows 大小写，保留文件名自身的单引号。 */
+function normalizeFilePath(filePath: string): string {
+  const absolute = resolve(process.cwd(), filePath).replace(/\\/g, "/");
   return process.platform === "win32" ? absolute.toLowerCase() : absolute;
+}
+
+function normalizeDiagnosticPath(filePath: string): string {
+  const unquoted =
+    filePath.startsWith("'") && filePath.endsWith("'") ? filePath.slice(1, -1) : filePath;
+  return normalizeFilePath(unquoted);
 }
 
 export interface ErrorFilterResult {
@@ -963,7 +1182,7 @@ export interface ErrorFilterResult {
 
 /**
  * 从合并的 stdout/stderr 收集指定文件和全局错误，忽略传递依赖错误。
- * specifiedFiles 仅含显式参数和 Git 收集文件；自动补入的声明文件不参与归属。
+ * specifiedFiles 含显式文件、目录展开和 Git 收集文件；自动补入的声明文件不参与归属。
  * 落在临时配置上的诊断（配置错误，含 extends 链上报的 base.json/jsonc）以及落在
  * 非受支持源文件（.json/.jsonc 等，含 JSON module）上的 TS 错误保守归为全局错误：
  * 这些不是"传递依赖"的豁免对象。传了 tmpTsconfigPath 时临时配置自身的诊断也归全局。
@@ -973,9 +1192,9 @@ export function filterErrorsInFiles(
   specifiedFiles: string[],
   tmpTsconfigPath?: string,
 ): ErrorFilterResult {
-  const targets = new Set(specifiedFiles.map(normalizeDiagnosticPath));
+  const targets = new Set(specifiedFiles.map(normalizeFilePath));
   const tmpConfigTarget =
-    tmpTsconfigPath === undefined ? undefined : normalizeDiagnosticPath(tmpTsconfigPath);
+    tmpTsconfigPath === undefined ? undefined : normalizeFilePath(tmpTsconfigPath);
   const errorsInSpecifiedFiles: string[] = [];
   const globalErrors: string[] = [];
 
@@ -985,13 +1204,14 @@ export function filterErrorsInFiles(
     const stripped = stripAnsiCodes(line).replace(/\s+$/, "");
     const located = LOCATED_ERROR_RE.exec(stripped) ?? PRETTY_LOCATED_ERROR_RE.exec(stripped);
     if (located) {
+      const rawPath = normalizeFilePath(located[1]!);
       const filePath = normalizeDiagnosticPath(located[1]!);
-      if (targets.has(filePath)) {
+      if (targets.has(rawPath) || targets.has(filePath)) {
         errorsInSpecifiedFiles.push(line);
         continue;
       }
       // 临时配置路径上的配置诊断、以及非受支持源文件上的 TS 错误，保守归全局
-      if (filePath === tmpConfigTarget || !isTscFile(filePath)) {
+      if (rawPath === tmpConfigTarget || filePath === tmpConfigTarget || !isTscFile(filePath)) {
         globalErrors.push(line);
       }
       continue;
