@@ -14,7 +14,8 @@ whenToUse: 用户要求对指定文件、目录、暂存或改动的 .vue/.ts/.t
 包括其中的 `compilerOptions`。较旧的 TypeScript 会按命令行文件独立编译，可能因缺少项目配置产生误报；
 TypeScript 6 在 cwd 存在 tsconfig.json 时会先报 TS5112，要求用 `--ignoreConfig` 明确跳过配置。
 
-本工具在原 tsconfig 旁生成临时配置，保留 `extends` 和其他配置选项，
+本工具在原 tsconfig 旁生成临时配置 `tsconfig.tmp.<随机>.json`（文件名带显式 `tmp` 标记，
+用户一条 `tsconfig.tmp.*.json` 的 `.gitignore` 规则即可忽略），保留 `extends` 和其他配置选项，
 将 `files` 替换为指定文件及按原配置 `include`/`exclude`/`files` 范围（含 `extends` 链）收集的 `.d.ts/.d.mts/.d.cts`，
 并将 `include` 设为 `[]`，避免把项目中的其他源文件全部作为检查入口。检查结束后自动删除临时配置。
 显式指定或由目录展开出的源文件不会被原 `include`/`exclude` 过滤；通过 `import` 引入的依赖也可能被检查，即使位于 `exclude` 中。
@@ -133,7 +134,7 @@ pnpm exec vue-tsc-files install --skill
 - 首个实参裸写 `install` 会被当成子命令；要检查名为 `install` 的目录请写 `./install`。
 - `--staged` 按暂存区选文件、但检查的是磁盘上的当前内容，不是 index 中的快照。
 - `skipLibCheck` 默认按 `true` 处理以提速；用户 tsconfig 或 `extends` 链中显式写了就以用户的为准。
-- 启用 incremental 或 composite 时使用独立临时 build-info 文件，用后清理。配置及 CLI 的 `tsBuildInfoFile` 会被内部临时路径覆盖，不改写项目持久缓存，也不提供跨运行缓存复用；强制终止或机器崩溃可能阻止清理。
+- 启用 incremental 或 composite 时使用独立临时 build-info 文件（`tsconfig.tmp.<随机>.tsbuildinfo`），用后清理。配置及 CLI 的 `tsBuildInfoFile` 会被内部临时路径覆盖，不改写项目持久缓存，也不提供跨运行缓存复用；强制终止或机器崩溃可能阻止清理。
 - monorepo 下用 `-p` 指定对应的子 tsconfig。`references` 会保留，但工具不自动构建引用项目，也不移除 `composite` / `declaration` 选项。引用项目输出可能需要预先构建，否则仍会报 TS6305；不能把 solution tsconfig 的调用当成完整的多项目检查。
 - 非零退出码表示检查失败或运行／用法错误，包括需要阻断的类型诊断、配置错误、依赖缺失和子进程异常；`--errors-in-changed-only` 不会豁免定位在配置文件上的错误、无文件位置的全局诊断、子进程中断或无可识别诊断的异常失败。
 - 未传有效文件或目录、且未启用 Git 收集模式时，以退出码 1 报用法错误；Git 收集模式没有可检查文件时提示并退出 0，这不表示已执行类型检查。

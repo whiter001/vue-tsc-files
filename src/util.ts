@@ -136,6 +136,8 @@ Ambiguous forwarding that changes option meaning is rejected; use explicit value
 If incremental/composite is effectively enabled, the buildinfo cache is redirected
 to a per-run temporary file — your configured or CLI-passed cache is never touched —
 and removed together with the temporary tsconfig after the check.
+The temporary config is written next to yours as tsconfig.tmp.<random>.json, so a
+single .gitignore rule (tsconfig.tmp.*.json) keeps it out of your repository.
 `;
 
 export type InstallRequest =
@@ -665,7 +667,7 @@ export function setupArgs() {
     remainingArgsToForward,
   };
 }
-/** 临时 tsconfig 使用 16 位小写十六进制随机后缀。 */
+/** 临时 tsconfig 使用 16 位小写十六进制随机后缀（文件名形如 tsconfig.tmp.<suffix>.json）。 */
 export function randomChars() {
   return randomBytes(8).toString("hex");
 }
@@ -990,10 +992,11 @@ function createTmpTsConfig(
   manageBuildInfo?: boolean,
 ) {
   // buildinfo 与 tmp 配置共用随机后缀：独占临时、不污染用户缓存，CLI 也能由 tmp 路径推导出它
+  // 文件名带显式 tmp 标记（tsconfig.tmp.*），用户一条 .gitignore 规则即可忽略
   const suffix = randomChars();
-  const tmpTsconfigPath = join(configDir, `tsconfig.${suffix}.json`);
+  const tmpTsconfigPath = join(configDir, `tsconfig.tmp.${suffix}.json`);
   const buildInfoPath = manageBuildInfo
-    ? join(configDir, `tsconfig.${suffix}.tsbuildinfo`)
+    ? join(configDir, `tsconfig.tmp.${suffix}.tsbuildinfo`)
     : undefined;
   const tmpTsconfig = {
     ...rootTsConfig,

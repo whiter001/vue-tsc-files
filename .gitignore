@@ -25,3 +25,6 @@ desktop.ini
 
 /.oxlintrc.cache.json
 *.tsbuildinfo
+
+# vue-tsc-files 生成的临时配置（正常用后即删，残留时忽略）
+tsconfig.tmp.*.json

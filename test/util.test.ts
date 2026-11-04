@@ -16,7 +16,7 @@ import {
   symlinkSync,
 } from "fs";
 import { tmpdir } from "os";
-import { dirname, isAbsolute, join, relative } from "path";
+import { basename, dirname, isAbsolute, join, relative } from "path";
 import { createRequire } from "module";
 import {
   getTscFiles,
@@ -897,6 +897,39 @@ test("createAndSetupTsConfig 按 tsconfig 范围收集 d.ts/.d.mts/.d.cts、尊�
   } finally {
     process.chdir(prevCwd);
     if (tmpPath) rmSync(tmpPath, { force: true });
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("createAndSetupTsConfig 临时配置名带 tsconfig.tmp. 标记，便于 .gitignore 一条规则忽略", () => {
+  const root = mkdtempSync(join(tmpdir(), "vtf-cfg-"));
+  const prevCwd = process.cwd();
+  const tmpPaths: string[] = [];
+  try {
+    const setup = (tsconfig: unknown) => {
+      writeFileSync(join(root, "tsconfig.json"), JSON.stringify(tsconfig));
+      process.chdir(root);
+      try {
+        const tmpPath = createAndSetupTsConfig(["good.ts"]);
+        tmpPaths.push(tmpPath);
+        return tmpPath;
+      } finally {
+        process.chdir(prevCwd);
+      }
+    };
+
+    // 临时配置：tsconfig.tmp.<16 位十六进制>.json
+    const tmpPath = setup({ compilerOptions: { strict: true } });
+    assert.match(basename(tmpPath), /^tsconfig\.tmp\.[0-9a-f]{16}\.json$/);
+
+    // 独占 buildinfo 同样带 tmp 标记，一条规则即可覆盖两种临时产物
+    const incremental = setup({ compilerOptions: { strict: true, incremental: true } });
+    const buildInfo = getInternalTsBuildInfoFile(incremental);
+    assert.ok(buildInfo);
+    assert.match(basename(buildInfo), /^tsconfig\.tmp\.[0-9a-f]{16}\.tsbuildinfo$/);
+  } finally {
+    process.chdir(prevCwd);
+    for (const p of tmpPaths) rmSync(p, { force: true });
     rmSync(root, { recursive: true, force: true });
   }
 });

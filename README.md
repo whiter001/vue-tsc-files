@@ -100,7 +100,7 @@ src/View.tsx(1,27): error TS17004: Cannot use JSX unless the '--jsx' flag is pro
 
 `paths`, `baseUrl`, `jsx`, `lib`, `types`, `experimentalDecorators` and the rest are simply not applied, and a lost `strict` fails in the opposite direction by reporting nothing at all.
 
-So "type-check only the files I changed, under the project configuration" is not something `vue-tsc` offers. That gap is what this tool fills, and it is not a replacement either: it writes a temporary `tsconfig.json` next to yours, with `files` set to the files you asked for plus the declaration files your own configuration already covers and `include` set to `[]`, then hands the work to the real `vue-tsc`. The check costs what your change costs instead of what the project costs, and it runs under your real options:
+So "type-check only the files I changed, under the project configuration" is not something `vue-tsc` offers. That gap is what this tool fills, and it is not a replacement either: it writes a temporary `tsconfig.tmp.<random>.json` next to yours, with `files` set to the files you asked for plus the declaration files your own configuration already covers and `include` set to `[]`, then hands the work to the real `vue-tsc`. The check costs what your change costs instead of what the project costs, and it runs under your real options:
 
 - `--changed`, `--staged` and `--unstaged` select the files from git
 - `--errors-in-changed-only` keeps errors in transitively imported files from failing your commit
@@ -235,6 +235,14 @@ Flag "--noEmit" is always passed to underlying `vue-tsc` by default. Response-fi
 `skipLibCheck` defaults to `true` for faster checks; an explicit `skipLibCheck` in your tsconfig (either `true` or `false`) always wins.
 
 The temporary tsconfig is created next to the original one (and removed afterwards), so relative `extends`, `baseUrl`, `paths` and other path-based options resolve exactly as they do for your own config.
+
+Its name carries an explicit `tmp` marker — `tsconfig.tmp.<random>.json` — so a single `.gitignore` rule keeps it out of your repository:
+
+```gitignore
+tsconfig.tmp.*.json
+```
+
+The same marker is used for the per-run build-info file (`tsconfig.tmp.<random>.tsbuildinfo`) when incremental or composite checking is enabled.
 
 When incremental or composite checking is enabled, the wrapper uses a per-run temporary build-info file and removes it afterwards. It overrides configured and CLI `tsBuildInfoFile` paths to avoid modifying your project's persistent cache; there is no cross-run incremental cache reuse. Force-killing the process or a machine crash may prevent cleanup.
 

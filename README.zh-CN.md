@@ -100,7 +100,7 @@ src/View.tsx(1,27): error TS17004: Cannot use JSX unless the '--jsx' flag is pro
 
 `paths`、`baseUrl`、`jsx`、`lib`、`types`、`experimentalDecorators` 之类统统不生效，而丢掉 `strict` 是反方向的漏报——根本不报。
 
-所以「只检查我改动的文件、并且沿用项目配置」这件事，`vue-tsc` 本来就不提供。这个缺口正是本工具补上的，而且它也不是要替代 `vue-tsc`：它在你原有 tsconfig 旁边生成一份临时配置，把 `files` 设成你指定的文件加上你原配置本就覆盖的声明文件、`include` 设为 `[]`，再把活儿交给真正的 `vue-tsc`。于是检查的代价由你的改动决定，而不是由整个项目决定，而且用的就是你真实的编译选项：
+所以「只检查我改动的文件、并且沿用项目配置」这件事，`vue-tsc` 本来就不提供。这个缺口正是本工具补上的，而且它也不是要替代 `vue-tsc`：它在你原有 tsconfig 旁边生成一份临时配置 `tsconfig.tmp.<随机>.json`，把 `files` 设成你指定的文件加上你原配置本就覆盖的声明文件、`include` 设为 `[]`，再把活儿交给真正的 `vue-tsc`。于是检查的代价由你的改动决定，而不是由整个项目决定，而且用的就是你真实的编译选项：
 
 - `--changed`、`--staged`、`--unstaged`，从 git 里挑文件
 - `--errors-in-changed-only`，传递依赖里的报错不会卡住你的提交
@@ -237,6 +237,14 @@ curl -fsSL -o .agents/skills/vue-tsc-files/SKILL.md \
 `skipLibCheck` 默认开启以加速检查；如果你的 tsconfig 显式设置了 `skipLibCheck`（无论 `true` 还是 `false`），以你的配置为准。
 
 临时 tsconfig 会创建在原 tsconfig 所在目录（用后删除），因此相对的 `extends`、`baseUrl`、`paths` 等基于路径的选项解析结果与你的原始配置完全一致。
+
+文件名带显式的 `tmp` 标记——`tsconfig.tmp.<随机>.json`——所以一条 `.gitignore` 规则就能让它不进你的仓库：
+
+```gitignore
+tsconfig.tmp.*.json
+```
+
+启用 incremental 或 composite 时每次运行独立的临时 build-info 文件也用同样的标记（`tsconfig.tmp.<随机>.tsbuildinfo`）。
 
 启用 incremental 或 composite 检查时，工具使用每次运行独立的临时 build-info 文件，用后删除。原配置及命令行中的 `tsBuildInfoFile` 路径会被覆盖，避免修改项目的持久缓存；不提供跨运行的增量缓存复用。强制终止进程或机器崩溃可能导致无法清理。
 

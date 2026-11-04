@@ -234,7 +234,7 @@ test("-p 指向子目录 tsconfig 时 extends 相对路径正常解析", () => {
     assert.equal(result.status, 0, result.stderr + result.stdout);
     // 子目录里的临时配置也被清理
     const leftovers = readdirSync(join(root, "configs")).filter((f) =>
-      /^tsconfig\..+\.json$/.test(f),
+      /^tsconfig\.tmp\..+\.json$/.test(f),
     );
     assert.deepEqual(leftovers, []);
   } finally {
@@ -1853,12 +1853,12 @@ assert.equal(first.compilerOptions.skipLibCheck, true);`,
 });
 
 function readdirSyncTmpConfigs(root: string) {
-  return readdirSync(root).filter((f: string) => /^tsconfig\..+\.json$/.test(f));
+  return readdirSync(root).filter((f: string) => /^tsconfig\.tmp\..+\.json$/.test(f));
 }
 
 /** 临时 tsconfig 与本次运行独占 buildinfo 都不允许残留 */
 function readdirSyncTmpArtifacts(root: string) {
-  return readdirSync(root).filter((f: string) => /^tsconfig\..+\.(json|tsbuildinfo)$/.test(f));
+  return readdirSync(root).filter((f: string) => /^tsconfig\.tmp\..+\.(json|tsbuildinfo)$/.test(f));
 }
 
 /** 包内随产物一起分发的 skill 源文件；CLI = <repo>/vue-tsc-files，故 dirname 即包根 */

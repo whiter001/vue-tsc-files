@@ -229,7 +229,7 @@ export function validate(
   }
   // 反复跑基准不能污染工作目录，否则清理成本会从测量里消失
   const leaked = readdirSync(root).filter((name) =>
-    /^tsconfig\..+\.(json|tsbuildinfo)$/.test(name),
+    /^tsconfig\.tmp\..+\.(json|tsbuildinfo)$/.test(name),
   );
   if (leaked.length > 0) {
     return fail(`fixture 目录残留临时产物：${leaked.join(", ")}`);
