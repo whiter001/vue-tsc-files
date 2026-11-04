@@ -45,7 +45,30 @@ jobs:
 
       - run: pnpm install --frozen-lockfile
 
+      # 版本可能已由本地 release.mjs 发布后再推 tag（v1.3.6/v1.3.7 的
+      # Publish run 都因此失败）。--prefer-online 绕开 npm/CDN 缓存：刚发布的
+      # 版本在缓存里可能仍不可见，误判会让 publish 撞上 "already published"。
+      # dry-run 手动入口不跳过，仍用于验证 OIDC 交换。
+      - name: Check whether version is already published
+        id: version
+        env:
+          DRY_RUN: ${{ inputs.dry_run }}
+        run: |
+          version=$(node -p "require('./package.json').version")
+          name=$(node -p "require('./package.json').name")
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          if [ "$DRY_RUN" = "true" ]; then
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          elif npm view "$name@$version" version --registry=https://registry.npmjs.org/ --prefer-online >/dev/null 2>&1; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::$name@$version is already on npm; skipping publish."
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
       # prepublishOnly 跑 check + test（test 的 pretest 会先 build），
       # 与本地 pnpm publish 的行为一致，这里不重复展开。
       # verbose 是为了失败时能看到 oidc 交换的原始报错。
-      - run: npm publish --loglevel verbose ${{ inputs.dry_run && '--dry-run' || '' }}
+      - name: Publish
+        if: steps.version.outputs.skip != 'true'
+        run: npm publish --loglevel verbose ${{ inputs.dry_run && '--dry-run' || '' }}
