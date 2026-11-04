@@ -626,18 +626,18 @@ test("getDiagnosticExitResult 把临时配置路径上的配置诊断归为全�
   assert.deepEqual(
     getDiagnosticExitResult(
       2,
-      "tsconfig.abc123.json(3,5): error TS5023: Unknown compiler option 'foo'.",
+      "tsconfig.tmp.abc123.json(3,5): error TS5023: Unknown compiler option 'foo'.",
       ["src/a.ts"],
-      "tsconfig.abc123.json",
+      "tsconfig.tmp.abc123.json",
     ),
     { exitCode: 2, ignoredDependencyErrors: false },
   );
   assert.deepEqual(
     getDiagnosticExitResult(
       2,
-      "tsconfig.abc123.json:3:5 - error TS5023: Unknown compiler option 'foo'.",
+      "tsconfig.tmp.abc123.json:3:5 - error TS5023: Unknown compiler option 'foo'.",
       ["src/a.ts"],
-      "tsconfig.abc123.json",
+      "tsconfig.tmp.abc123.json",
     ),
     { exitCode: 2, ignoredDependencyErrors: false },
   );
@@ -743,7 +743,7 @@ test("filterErrorsInFiles 收集无文件位置的全局错误", () => {
 test("filterErrorsInFiles 把临时配置与非受支持源文件诊断归为全局", () => {
   const output = [
     "src/a.ts(1,1): error TS2322: x",
-    "tsconfig.zzz9.json(3,5): error TS5023: Unknown compiler option 'foo'.",
+    "tsconfig.tmp.zzz9.json(3,5): error TS5023: Unknown compiler option 'foo'.",
     "base.json(2,3): error TS2322: y",
     "src/dep.ts(4,5): error TS2322: z",
   ].join("\n");
@@ -751,13 +751,13 @@ test("filterErrorsInFiles 把临时配置与非受支持源文件诊断归为全
   const { errorsInSpecifiedFiles, globalErrors } = filterErrorsInFiles(
     output,
     ["src/a.ts"],
-    "tsconfig.zzz9.json",
+    "tsconfig.tmp.zzz9.json",
   );
   assert.equal(errorsInSpecifiedFiles.length, 1);
   assert.match(errorsInSpecifiedFiles[0]!, /src\/a\.ts/);
   // 临时配置上的配置诊断与 base.json 上的 TS 错误归全局，依赖的 src/dep.ts 仍被忽略
   assert.equal(globalErrors.length, 2);
-  assert.match(globalErrors[0]!, /tsconfig\.zzz9\.json/);
+  assert.match(globalErrors[0]!, /tsconfig\.tmp\.zzz9\.json/);
   assert.match(globalErrors[1]!, /base\.json/);
 });
 
