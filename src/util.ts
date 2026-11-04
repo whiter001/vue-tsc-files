@@ -905,12 +905,21 @@ function getRepoRoot(): string {
  * 一侧已删除）同样剔除，否则 vue-tsc 的 "file not found" 会被归为全局
  * 错误导致误失败。
  */
-function toCheckableFiles(repoRoot: string, gitPaths: string[]): string[] {
+export function toCheckableFiles(
+  repoRoot: string,
+  gitPaths: string[],
+  cwd: string = process.cwd(),
+): string[] {
+  // Windows 下 cwd 常是 8.3 短路径（os.tmpdir() 形如 C:/Users/USER~1/...），
+  // git rev-parse 却返回长路径；relative 只按字符串相减，两种写法相减会拼出
+  // 一长串假的 .. 前缀，既破坏去重又让诊断路径偏离 cwd。两边先规范化成真实路径。
+  const canonicalCwd = realpathSync.native(cwd);
+  const canonicalRoot = realpathSync.native(repoRoot);
   return gitPaths
-    .map((path) => relative(process.cwd(), resolve(repoRoot, path)))
+    .map((path) => relative(canonicalCwd, resolve(canonicalRoot, path)))
     .filter((path) => !path.split(/[\\/]/).includes("node_modules"))
     .filter(isTscFile)
-    .filter((path) => existsSync(resolve(process.cwd(), path)));
+    .filter((path) => existsSync(resolve(canonicalCwd, path)));
 }
 
 /**

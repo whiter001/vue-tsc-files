@@ -35,6 +35,7 @@ import {
   formatVersion,
   expandDirectory,
   resolveSourceArg,
+  toCheckableFiles,
 } from "../src/util.ts";
 
 const require = createRequire(import.meta.url);
@@ -818,6 +819,26 @@ test("parseGitStatusPorcelain 解析各类变更状态，跳过删除文件和�
 
 test("parseGitStatusPorcelain 空输出返回空数组", () => {
   assert.deepEqual(parseGitStatusPorcelain(""), []);
+});
+
+test("toCheckableFiles 在 cwd 与仓库根是同一目录的不同写法时仍返回 cwd 相对短名", (t) => {
+  const root = mkdtempSync(join(tmpdir(), "vtf-alias-"));
+  const realDir = join(root, "real");
+  const alias = join(root, "alias");
+  mkdirSync(realDir, { recursive: true });
+  try {
+    symlinkSync(realDir, alias, process.platform === "win32" ? "junction" : "dir");
+  } catch {
+    return t.skip("本平台建不了目录符号链接");
+  }
+  try {
+    writeFileSync(join(realDir, "a.ts"), "export default 1;\n");
+    // 8.3 短路径、目录 junction、macOS /var 链接都会让 cwd 与 git rev-parse
+    // 的输出字面不同但指向同一目录；纯字符串相减会多出假的 .. 前缀
+    assert.deepEqual(toCheckableFiles(realDir, ["a.ts"], alias), ["a.ts"]);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test("createAndSetupTsConfig 按 tsconfig 范围收集 d.ts/.d.mts/.d.cts、尊重用户 skipLibCheck、tmp 配置与原配置同目录", () => {
