@@ -67,16 +67,16 @@ pnpm dlx @whiter001/vue-tsc-files src/App.vue
 
 ## 常用参数
 
-| 参数                       | 说明                                                                                          |
-| -------------------------- | --------------------------------------------------------------------------------------------- |
-| `<files...>`               | 要检查的 .vue/.ts/.tsx/.mts/.cts 文件，相对 cwd 解析，也支持绝对路径和多个文件                |
-| `<dirs...>`                | 要检查的目录，递归展开其中的 .vue/.ts/.tsx/.mts/.cts 文件；`node_modules` 内的路径跳过        |
-| `-p` / `--project <path>`  | 指定 tsconfig（monorepo 里常用 `tsconfig.app.json`）；可传目录，此时读取其中的 tsconfig.json  |
-| `--errors-in-changed-only` | 别名 `--changed-only`：完整打印诊断，按指定文件归属过滤类型错误；配置错误及子进程异常始终失败 |
-| `--changed`                | 从 Git 收集改动文件（含 staged + unstaged + untracked），可省略命令行文件列表                 |
-| `--staged`                 | 按暂存区变更收集文件，实际检查磁盘上的当前内容                                                |
-| `--unstaged`               | 只收集工作区与 index 有差异的 tracked 文件（不含 untracked）                                  |
-| `--version`                | 打印当前生效的包名与版本后退出，不做类型检查                                                  |
+| 参数                       | 说明                                                                                                   |
+| -------------------------- | ------------------------------------------------------------------------------------------------------ |
+| `<files...>`               | 要检查的 .vue/.ts/.tsx/.mts/.cts 文件，相对 cwd 解析，也支持绝对路径和多个文件                         |
+| `<dirs...>`                | 要检查的目录，递归展开其中的 .vue/.ts/.tsx/.mts/.cts 文件；`node_modules` 内的路径跳过                 |
+| `-p` / `--project <path>`  | 指定 tsconfig（monorepo 里常用 `tsconfig.app.json`）；可传目录，此时读取其中的 tsconfig.json           |
+| `--errors-in-changed-only` | 别名 `--changed-only`：只展示指定文件及全局/配置诊断，非目标源文件错误不影响退出码；子进程异常始终失败 |
+| `--changed`                | 从 Git 收集改动文件（含 staged + unstaged + untracked），可省略命令行文件列表                          |
+| `--staged`                 | 按暂存区变更收集文件，实际检查磁盘上的当前内容                                                         |
+| `--unstaged`               | 只收集工作区与 index 有差异的 tracked 文件（不含 untracked）                                           |
+| `--version`                | 打印当前生效的包名与版本后退出，不做类型检查                                                           |
 
 `--errors-in-changed-only` 只按诊断的文件归属过滤，不比较 Git 基线或修改行：
 未指定文件中的新错误也可能被豁免，指定文件中的旧错误仍会阻断。

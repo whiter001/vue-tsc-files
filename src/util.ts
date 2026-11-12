@@ -123,8 +123,8 @@ File collection:
 Flags:
   -p, --project <path>        Use a specific tsconfig.json (--project=<path> also works)
   --errors-in-changed-only    Only errors in the specified files (plus global
-                              config errors) affect the exit code; errors in
-                              transitively compiled files are printed but ignored
+                              config errors) are printed and affect the exit code;
+                              transitively compiled file errors are omitted
   --changed-only              Alias for --errors-in-changed-only
   -h, --help                  Show this help
   --version                   Show the version of this package
@@ -1192,6 +1192,23 @@ export interface ErrorFilterResult {
   globalErrors: string[];
 }
 
+type LocatedErrorKind = "specified" | "global" | "dependency";
+
+function classifyLocatedError(
+  located: RegExpExecArray,
+  targets: ReadonlySet<string>,
+  tmpConfigTarget: string | undefined,
+): LocatedErrorKind {
+  const rawPath = normalizeFilePath(located[1]!);
+  const filePath = normalizeDiagnosticPath(located[1]!);
+  if (targets.has(rawPath) || targets.has(filePath)) return "specified";
+  // 临时配置路径上的配置诊断、以及非受支持源文件上的 TS 错误，保守归全局
+  if (rawPath === tmpConfigTarget || filePath === tmpConfigTarget || !isTscFile(filePath)) {
+    return "global";
+  }
+  return "dependency";
+}
+
 /**
  * 从合并的 stdout/stderr 收集指定文件和全局错误，忽略传递依赖错误。
  * specifiedFiles 含显式文件、目录展开和 Git 收集文件；自动补入的声明文件不参与归属。
@@ -1216,16 +1233,9 @@ export function filterErrorsInFiles(
     const stripped = stripAnsiCodes(line).replace(/\s+$/, "");
     const located = LOCATED_ERROR_RE.exec(stripped) ?? PRETTY_LOCATED_ERROR_RE.exec(stripped);
     if (located) {
-      const rawPath = normalizeFilePath(located[1]!);
-      const filePath = normalizeDiagnosticPath(located[1]!);
-      if (targets.has(rawPath) || targets.has(filePath)) {
-        errorsInSpecifiedFiles.push(line);
-        continue;
-      }
-      // 临时配置路径上的配置诊断、以及非受支持源文件上的 TS 错误，保守归全局
-      if (rawPath === tmpConfigTarget || filePath === tmpConfigTarget || !isTscFile(filePath)) {
-        globalErrors.push(line);
-      }
+      const kind = classifyLocatedError(located, targets, tmpConfigTarget);
+      if (kind === "specified") errorsInSpecifiedFiles.push(line);
+      if (kind === "global") globalErrors.push(line);
       continue;
     }
     if (GLOBAL_ERROR_RE.test(stripped.trimStart())) {
@@ -1234,6 +1244,86 @@ export function filterErrorsInFiles(
   }
 
   return { errorsInSpecifiedFiles, globalErrors };
+}
+
+export interface DiagnosticOutputFilterResult {
+  output: string;
+  ignoredErrorCount: number;
+}
+
+const FOUND_ERRORS_RE = /^Found \d+ errors?(?: in .+)?\.?$/;
+const ERROR_FILES_HEADER_RE = /^Errors\s+Files$/;
+const ERROR_FILES_ROW_RE = /^\s*\d+\s{2,}.+:\d+$/;
+const PRETTY_CODE_FRAME_LINE_RE = /^\d+\s/;
+
+/**
+ * 过滤传递依赖的完整诊断块，而非只删首行：pretty 的代码片段、缩进续行和
+ * Found/Errors Files 汇总也不能留下。未缩进的普通输出作为新段落保留，
+ * 避免依赖诊断之后打印的 extendedDiagnostics 或子进程日志被一并吞掉。
+ */
+export function filterDiagnosticOutput(
+  output: string,
+  specifiedFiles: string[],
+  tmpTsconfigPath?: string,
+): DiagnosticOutputFilterResult {
+  const targets = new Set(specifiedFiles.map(normalizeFilePath));
+  const tmpConfigTarget =
+    tmpTsconfigPath === undefined ? undefined : normalizeFilePath(tmpTsconfigPath);
+  const kept: string[] = [];
+  let ignoredErrorCount = 0;
+  let ignoringDependency = false;
+  let inErrorFilesSummary = false;
+
+  for (const line of output.split(/(?<=\n)/)) {
+    const text = line.replace(/\r?\n$/, "");
+    // 与错误归属相同：不去前导空白，避免改变合法文件名的归属。
+    const stripped = stripAnsiCodes(text).replace(/\s+$/, "");
+    const trimmed = stripped.trimStart();
+    const located = LOCATED_ERROR_RE.exec(stripped) ?? PRETTY_LOCATED_ERROR_RE.exec(stripped);
+    if (located) {
+      inErrorFilesSummary = false;
+      ignoringDependency = classifyLocatedError(located, targets, tmpConfigTarget) === "dependency";
+      if (ignoringDependency) {
+        ignoredErrorCount++;
+      } else {
+        kept.push(line);
+      }
+      continue;
+    }
+    if (GLOBAL_ERROR_RE.test(trimmed)) {
+      ignoringDependency = false;
+      inErrorFilesSummary = false;
+      kept.push(line);
+      continue;
+    }
+    if (FOUND_ERRORS_RE.test(stripped.trim())) {
+      ignoringDependency = false;
+      inErrorFilesSummary = false;
+      continue;
+    }
+    if (ERROR_FILES_HEADER_RE.test(stripped.trim())) {
+      ignoringDependency = false;
+      inErrorFilesSummary = true;
+      continue;
+    }
+    if (inErrorFilesSummary) {
+      if (!trimmed || ERROR_FILES_ROW_RE.test(stripped)) continue;
+      inErrorFilesSummary = false;
+    }
+    if (!ignoringDependency) {
+      kept.push(line);
+      continue;
+    }
+    if (!trimmed || /^\s/.test(stripped) || PRETTY_CODE_FRAME_LINE_RE.test(stripped)) {
+      continue;
+    }
+    ignoringDependency = false;
+    kept.push(line);
+  }
+
+  // 没有依赖错误时原样返回，保留 tsc 自己的汇总和所有换行细节。
+  if (ignoredErrorCount === 0) return { output, ignoredErrorCount };
+  return { output: kept.join(""), ignoredErrorCount };
 }
 
 export function getDiagnosticExitResult(

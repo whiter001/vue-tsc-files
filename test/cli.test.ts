@@ -98,7 +98,7 @@ test("-p 显式指定 tsconfig，文件参数在 -p 之前也正常", () => {
   }
 });
 
-test("--errors-in-changed-only 忽略传递依赖文件的错误", () => {
+test("--errors-in-changed-only 忽略且不展示传递依赖文件的错误", () => {
   const root = createFixture({
     "good.ts": 'import a from "./dep";\nexport default a;\n',
     "dep.ts": 'const a: number = "x";\nexport default a;\n',
@@ -106,9 +106,8 @@ test("--errors-in-changed-only 忽略传递依赖文件的错误", () => {
   try {
     const result = runCli(root, ["--errors-in-changed-only", "good.ts"]);
     assert.equal(result.status, 0, result.stderr);
-    // 依赖文件的错误仍原样展示，但不影响退出码
-    assert.match(result.stdout, /dep\.ts.*error TS2322/);
-    assert.match(result.stderr, /--errors-in-changed-only/);
+    assert.doesNotMatch(result.stdout, /dep\.ts|error TS2322/);
+    assert.match(result.stderr, /ignored 1 error.*--errors-in-changed-only/);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -127,6 +126,24 @@ test("--errors-in-changed-only 下指定文件自身的错误仍以非 0 退出"
   }
 });
 
+test("--errors-in-changed-only --pretty 过滤依赖代码和汇总，保留目标诊断", () => {
+  const root = createFixture({
+    "bad.ts": 'import a from "./dep";\nconst b: number = "y";\nexport default [a, b];\n',
+    "dep.ts": 'const a: number = "x";\nexport default a;\n',
+  });
+  try {
+    const result = runCli(root, ["--errors-in-changed-only", "--pretty", "bad.ts"]);
+    assert.equal(result.status, 2, result.stdout + result.stderr);
+    const output = stripAnsiCodes(result.stdout);
+    assert.match(output, /bad\.ts:2:7 - error TS2322/);
+    assert.match(output, /2 const b: number = "y";/);
+    assert.doesNotMatch(output, /dep\.ts|const a: number|Found \d+ errors?|Errors\s+Files/);
+    assert.match(result.stderr, /ignored 1 error/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("--changed-only 别名端到端生效", () => {
   const root = createFixture({
     "good.ts": 'import a from "./dep";\nexport default a;\n',
@@ -135,6 +152,7 @@ test("--changed-only 别名端到端生效", () => {
   try {
     const result = runCli(root, ["--changed-only", "good.ts"]);
     assert.equal(result.status, 0, result.stderr);
+    assert.doesNotMatch(result.stdout, /dep\.ts|error TS2322/);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -160,10 +178,10 @@ test("--errors-in-changed-only 支持含空格的文件路径", () => {
     "src/my dep.ts": 'const a: number = "x";\nexport default a;\n',
   });
   try {
-    // 含空格的依赖文件错误被忽略
+    // 含空格的依赖文件错误被忽略且不再展示
     const ignored = runCli(root, ["--errors-in-changed-only", "src/foo bar.ts"]);
     assert.equal(ignored.status, 0, ignored.stderr);
-    assert.match(ignored.stdout, /my dep\.ts.*error TS2322/);
+    assert.doesNotMatch(ignored.stdout, /my dep\.ts|error TS2322/);
 
     // 含空格的指定文件自身错误仍然算数
     const counted = runCli(root, ["--errors-in-changed-only", "src/my dep.ts"]);
@@ -183,11 +201,11 @@ test("--errors-in-changed-only 下文件名前导空格不被 trim，目标文�
     " bad.vue": sfc('const a: number = "x";\nexport default a;\n'),
   });
   try {
-    // 依赖错误仍按传递依赖豁免
+    // 依赖错误仍按传递依赖豁免，且不展示
     for (const good of [" good.ts", " good.vue"]) {
       const ignored = runCli(root, ["--errors-in-changed-only", good]);
       assert.equal(ignored.status, 0, ignored.stderr);
-      assert.match(ignored.stdout, /error TS2322/);
+      assert.doesNotMatch(ignored.stdout, /error TS2322/);
     }
 
     // 目标文件自身（前导空格文件名）必须失败，不能被当成依赖错误放行
@@ -209,9 +227,10 @@ test("--errors-in-changed-only 转发 --pretty 时错误归属仍然正确", () 
     "dep.ts": 'const a: number = "x";\nexport default a;\n',
   });
   try {
-    // 传递依赖的错误在 --pretty 输出格式下同样被忽略
+    // 传递依赖的错误在 --pretty 输出格式下同样被忽略且不再展示
     const lenient = runCli(root, ["--errors-in-changed-only", "--pretty", "good.ts"]);
     assert.equal(lenient.status, 0, lenient.stderr);
+    assert.doesNotMatch(stripAnsiCodes(lenient.stdout), /dep\.ts|error TS2322|Found \d+ errors?/);
     assert.match(lenient.stderr, /--errors-in-changed-only/);
 
     // 指定文件自身的错误在 --pretty 下仍然算数
@@ -1041,7 +1060,7 @@ test("目录展开的文件参与 --errors-in-changed-only 的错误归属", () 
   }
 });
 
-test("目录外的依赖错误在 --errors-in-changed-only 下仍被豁免", () => {
+test("目录外的依赖错误在 --errors-in-changed-only 下仍被豁免且不展示", () => {
   const root = createFixture({
     "src/good.ts": 'import a from "../dep";\nexport default a;\n',
     "dep.ts": 'const a: number = "x";\nexport default a;\n',
@@ -1049,7 +1068,7 @@ test("目录外的依赖错误在 --errors-in-changed-only 下仍被豁免", () 
   try {
     const result = runCli(root, ["--errors-in-changed-only", "src"]);
     assert.equal(result.status, 0, result.stdout + result.stderr);
-    assert.match(result.stdout, /dep\.ts\(\d+,\d+\): error TS2322/);
+    assert.doesNotMatch(result.stdout, /dep\.ts|error TS2322/);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

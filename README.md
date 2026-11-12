@@ -147,7 +147,7 @@ A failed type check (or a failed spawn) always exits with a non-zero code. When 
 
 ## Only fail on errors in the specified files
 
-`vue-tsc` compiles the specified files together with everything they transitively import. Pass `--errors-in-changed-only` (alias: `--changed-only`) to ignore errors in non-target source files: the full output is still printed, but only errors in explicitly passed, directory-expanded or Git-collected files affect the diagnostic exit code. Configuration errors and abnormal child-process termination always fail.
+`vue-tsc` compiles the specified files together with everything they transitively import. Pass `--errors-in-changed-only` (alias: `--changed-only`) to hide errors in non-target source files and exclude them from the diagnostic exit code. Only diagnostics in explicitly passed, directory-expanded or Git-collected files, plus global and configuration errors, are printed; a note reports how many transitive-dependency errors were omitted. Configuration errors and abnormal child-process termination always fail, and abnormal-process output is preserved.
 
 Filtering is file-based, not a comparison against a Git baseline or changed lines. Existing errors in target files still fail; newly introduced errors in non-target dependencies may be ignored. Automatically collected declaration files are not targets unless explicitly passed, found by directory expansion or collected by Git.
 

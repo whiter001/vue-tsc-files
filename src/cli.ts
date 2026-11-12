@@ -8,6 +8,7 @@ import {
   createAndSetupTsConfig,
   createResolverRequires,
   getDiagnosticExitResult,
+  filterDiagnosticOutput,
   getInternalTsBuildInfoFile,
 } from "./util.ts";
 
@@ -96,23 +97,30 @@ function typeCheck() {
     console.error(result.error);
     process.exitCode = 1;
   } else {
-    if (result.stdout) {
-      process.stdout.write(result.stdout);
-    }
-    if (result.stderr) {
-      process.stderr.write(result.stderr);
-    }
-
     const output = `${result.stdout ?? ""}\n${result.stderr ?? ""}`;
     // 子进程被信号终止（signal 非 null，或 status 为 null）时输出不可信，绝不按依赖豁免
     const interrupted = result.signal !== null || result.status === null;
-    const { exitCode, ignoredDependencyErrors } = interrupted
-      ? { exitCode: 1, ignoredDependencyErrors: false }
+    const { exitCode } = interrupted
+      ? { exitCode: 1 }
       : getDiagnosticExitResult(result.status, output, specifiedFiles, tmpTsconfigPath);
-    if (ignoredDependencyErrors) {
+
+    let stdout = result.stdout ?? "";
+    let stderr = result.stderr ?? "";
+    let ignoredErrorCount = 0;
+    // 只有 tsc 的正常诊断退出才过滤；崩溃、中断等异常输出必须原样保留。
+    if (!interrupted && result.status === 2) {
+      const filteredStdout = filterDiagnosticOutput(stdout, specifiedFiles, tmpTsconfigPath);
+      const filteredStderr = filterDiagnosticOutput(stderr, specifiedFiles, tmpTsconfigPath);
+      stdout = filteredStdout.output;
+      stderr = filteredStderr.output;
+      ignoredErrorCount = filteredStdout.ignoredErrorCount + filteredStderr.ignoredErrorCount;
+    }
+    if (stdout) process.stdout.write(stdout);
+    if (stderr) process.stderr.write(stderr);
+    if (ignoredErrorCount > 0) {
       console.error(
-        `\nNote: vue-tsc reported errors only in transitively compiled files, ` +
-          `which are ignored by --errors-in-changed-only (exit 0).`,
+        `\nNote: ignored ${ignoredErrorCount} ${ignoredErrorCount === 1 ? "error" : "errors"} ` +
+          `in transitively compiled files (--errors-in-changed-only).`,
       );
     }
     // process.exitCode 让异步管道写入自然排空，避免 process.exit 截断尾部输出。

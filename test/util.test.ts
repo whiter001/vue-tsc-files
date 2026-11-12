@@ -25,6 +25,7 @@ import {
   createAndSetupTsConfig,
   getInternalTsBuildInfoFile,
   filterErrorsInFiles,
+  filterDiagnosticOutput,
   getDiagnosticExitResult,
   stripAnsiCodes,
   parseGitStatusPorcelain,
@@ -672,6 +673,72 @@ test("filterErrorsInFiles 只保留指定文件的错误，忽略传递依赖的
   assert.equal(errorsInSpecifiedFiles.length, 1);
   assert.match(errorsInSpecifiedFiles[0]!, /src\/changed\.ts/);
   assert.deepEqual(globalErrors, []);
+});
+
+test("filterDiagnosticOutput 过滤依赖诊断块并保留目标、全局错误与普通输出", () => {
+  const output = [
+    "BEFORE",
+    "src/changed.ts(1,7): error TS2322: target",
+    "src/dep.ts(2,3): error TS2322: dependency",
+    "  dependency message continuation",
+    "error TS5083: global config error",
+    "Files: 42",
+    "",
+  ].join("\n");
+
+  const result = filterDiagnosticOutput(output, ["src/changed.ts"]);
+  assert.equal(result.ignoredErrorCount, 1);
+  assert.equal(
+    result.output,
+    [
+      "BEFORE",
+      "src/changed.ts(1,7): error TS2322: target",
+      "error TS5083: global config error",
+      "Files: 42",
+      "",
+    ].join("\n"),
+  );
+});
+
+test("filterDiagnosticOutput 清理 pretty 依赖代码块及失效的错误汇总", () => {
+  const output = [
+    "src/changed.ts:1:7 - error TS2322: target",
+    "",
+    "1 const target: number = 'x';",
+    "        ~",
+    "",
+    "src/dep.ts:2:3 - error TS2322: dependency",
+    "",
+    "2 const dependency: number = 'x';",
+    "        ~",
+    "",
+    "Found 2 errors in 2 files.",
+    "",
+    "Errors  Files",
+    "     1  src/changed.ts:1",
+    "     1  src/dep.ts:2",
+    "",
+    "Files: 42",
+    "",
+  ].join("\n");
+
+  const result = filterDiagnosticOutput(output, ["src/changed.ts"]);
+  assert.equal(result.ignoredErrorCount, 1);
+  assert.match(result.output, /src\/changed\.ts:1:7 - error TS2322/);
+  assert.match(result.output, /1 const target: number = 'x';/);
+  assert.match(result.output, /Files: 42/);
+  assert.doesNotMatch(result.output, /src\/dep\.ts|const dependency|Found 2 errors|Errors\s+Files/);
+});
+
+test("filterDiagnosticOutput 没有依赖错误时逐字保留原输出", () => {
+  const output =
+    "src/changed.ts:1:7 - error TS2322: target\r\n\r\n" +
+    "1 const target: number = 'x';\r\n\r\n" +
+    "Found 1 error in src/changed.ts:1\r\n";
+  assert.deepEqual(filterDiagnosticOutput(output, ["src/changed.ts"]), {
+    output,
+    ignoredErrorCount: 0,
+  });
 });
 
 test("filterErrorsInFiles 中 ./ 前缀和相对路径写法等价", () => {
